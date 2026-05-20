@@ -101,15 +101,6 @@ namespace Server.Models
             });
         }
 
-        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
-        {
-            IConfigurationRoot configuration = new ConfigurationBuilder()
-                .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
-                .AddJsonFile("appsettings.json")
-                .Build();
-            optionsBuilder.UseSqlServer(configuration.GetConnectionString("DefaultConnection"));
-        }
-
         public ClientStatus? Find(string Name)
         {
             List<ClientStatus> clientStatus = [.. EstadoCliente.Where(e => e.Cliente == Name)];

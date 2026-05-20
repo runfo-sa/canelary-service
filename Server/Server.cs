@@ -39,7 +39,14 @@ namespace Server
         {
             var builder = WebApplication.CreateBuilder(args);
 
-            builder.Services.AddDbContext<ClientStatusDb>();
+            // Usa la configuracion del host (appsettings.json + env vars + etc.) para que
+            // ConnectionStrings__DefaultConnection seteado via docker-compose o systemd
+            // tenga prioridad sobre el default de appsettings.json.
+            builder.Services.AddDbContext<ClientStatusDb>((sp, options) =>
+            {
+                var cs = sp.GetRequiredService<IConfiguration>().GetConnectionString("DefaultConnection");
+                options.UseSqlServer(cs);
+            });
 
             // Options pattern para la seccion Auth.
             // El builder ya incluye AddEnvironmentVariables() por default, asi que en produccion
