@@ -1,9 +1,10 @@
 ﻿using Core;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.Extensions.Primitives;
-using Microsoft.IdentityModel.Tokens;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Server.Logic;
 using Server.Models;
+using Server.Serialization;
 using System.Net;
 using System.Threading.RateLimiting;
 
@@ -11,10 +12,28 @@ namespace Server
 {
     public static class Server
     {
-        private static readonly string LogFolder = "Visual Ternera Server\\";
         private static readonly string ClientFolder = "client-repo";
         private static readonly string ClientFile = "Client.exe";
         private static readonly string InstallerFile = "installer.ps1";
+
+        /// <summary>
+        /// Resuelve la clave de descarga preferentemente desde el header <c>Authorization: Bearer ...</c>,
+        /// y como fallback transitorio desde el query string <c>?key=...</c> para no romper clientes ya
+        /// desplegados que usan el esquema anterior.
+        /// </summary>
+        private static string? ResolveDownloadKey(HttpContext context)
+        {
+            if (context.Request.Headers.TryGetValue("Authorization", out var auth))
+            {
+                string value = auth.ToString();
+                const string prefix = "Bearer ";
+                if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return value.Substring(prefix.Length);
+                }
+            }
+            return context.Request.Query["key"];
+        }
 
         public static void Run(string[] args)
         {
@@ -22,17 +41,41 @@ namespace Server
 
             builder.Services.AddDbContext<ClientStatusDb>();
 
+            // Options pattern para la seccion Auth.
+            // El builder ya incluye AddEnvironmentVariables() por default, asi que en produccion
+            // se puede setear `Auth__ClavePublica`, `Auth__ClavePrivada`, `Auth__ClaveDescarga`
+            // como env vars y sacar el bloque de appsettings.json sin tocar codigo.
+            builder.Services.AddOptions<AuthConfig>()
+                .BindConfiguration("Auth")
+                .ValidateOnStart();
+
+            // JSON source generators para los DTOs compartidos via Core.
+            builder.Services.ConfigureHttpJsonOptions(o =>
+                o.SerializerOptions.TypeInfoResolverChain.Insert(0, CanelaryJsonContext.Default));
+
+            // Problem details (RFC 9457) + exception handler para devolver fallos del server
+            // como JSON estructurado en vez de paginas HTML por default.
+            builder.Services.AddProblemDetails();
+
+            // Healthcheck que verifica que la conexion al SQL Server (memory-optimized) este viva.
+            builder.Services.AddHealthChecks()
+                .AddDbContextCheck<ClientStatusDb>(name: "database");
+
             // Swager Docs
             builder.Services.AddEndpointsApiExplorer();
             builder.Services.AddSwaggerGen(c =>
             {
-                c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+                c.SwaggerDoc("v1", new Microsoft.OpenApi.OpenApiInfo
                 {
-                    Title = "Visual Ternera - Controlador de Etiquetas",
+                    Title = "Canelary - Controlador de Etiquetas",
                     Description = "Web API encargada de reportar el estado de etiquetas en cada puesto",
                     Version = "v1"
                 });
             });
+
+            // CORS abierto para el dashboard web servido desde otro origen en la LAN.
+            builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
+                p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
             // Watchers singleton
             builder.Services.AddSingleton<WatcherPiQuatro>();
@@ -51,13 +94,18 @@ namespace Server
 
             var app = builder.Build();
 
+            // ExceptionHandler debe ir antes que cualquier middleware que pueda fallar.
+            // Devuelve ProblemDetails (RFC 9457) al cliente sin filtrar excepciones internas.
+            app.UseExceptionHandler();
+
             app.UseSwagger();
             app.UseSwaggerUI();
             app.UseRateLimiter();
 
-            //app.UseHttpsRedirection();
+            // Healthcheck endpoint exento de auth y rate-limiting; usable por load balancers / oncall.
+            app.MapHealthChecks("/healthz").DisableRateLimiting();
 
-            var authConfig = app.Configuration.GetSection("Auth").Get<AuthConfig>()!;
+            var authConfig = app.Services.GetRequiredService<IOptions<AuthConfig>>().Value;
             var piQuatroWatch = app.Services.GetService<WatcherPiQuatro>();
             var clientWatch = app.Services.GetService<WatcherClient>();
 
@@ -65,24 +113,15 @@ namespace Server
             {
                 // Middleware que verifica si es una conexión valida y la termina en caso de no serlo.
                 // Solamente para estos endpoints.
-                if (context.Request.Path.StartsWithSegments("/validarcliente") ||
-                    context.Request.Path.StartsWithSegments("/multiplesinstalaciones"))
+                if (context.Request.Path.StartsWithSegments("/validate-client") ||
+                    context.Request.Path.StartsWithSegments("/multiple-installations"))
                 {
-                    var query = context.Request.Headers.ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+                    string? key = context.Request.Headers["request-key"];
+                    string? hash = context.Request.Headers["request-hash"];
 
-                    StringValues key;
-                    StringValues hash;
-
-                    if (!query.TryGetValue("request-key", out key)
-                        || key.IsNullOrEmpty()
-                        || !query.TryGetValue("request-hash", out hash)
-                        || hash.IsNullOrEmpty()
-                        // Comprobamos que el hash y key recibidos sean coherentes
-                        || Encryption.EncryptKey(key!, authConfig.ClavePrivada) != hash
-                        // Comprobamos que podemos obtener el mismo hash con nuestra clave publica y privada
-                        || Encryption.EncryptKey(authConfig.ClavePublica, authConfig.ClavePrivada) != hash)
+                    if (!AuthValidator.IsRequestAuthorized(key, hash, authConfig.ClavePrivada))
                     {
-                        context.Response.StatusCode = (Int32)HttpStatusCode.Unauthorized;
+                        context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
                         await context.Response.WriteAsync("Unauthorized");
                         return;
                     }
@@ -93,110 +132,135 @@ namespace Server
 
             app.UseRouting();
 
-            // API Endpoints:
-            app.MapPost("/validarcliente", async (ClientStatusDb db, Request client, HttpContext context) =>
-            {
-                Status status = Analysis.CheckClient(client, piQuatroWatch!.ServerEtiquetas);
+            app.UseCors();
 
-                ClientStatus? clientStatus = db.Find(client.Name);
+            // API Endpoints:
+            app.MapPost("/validate-client", async (ClientStatusDb db, Request client, HttpContext context) =>
+            {
+                (Status status, List<EtiquetaCliente> diff) = Analysis.CheckClient(client, piQuatroWatch!.ServerEtiquetas);
+                var name = (context.Connection.RemoteIpAddress is not null) ? context.Connection.RemoteIpAddress.ToString() : client.Name;
+
+                ClientStatus? clientStatus = db.EstadoCliente
+                    .Include(c => c.Etiquetas)
+                    .FirstOrDefault(c => c.Cliente == name);
+
                 if (clientStatus is null)
                 {
-                    await db.EstadoCliente.AddAsync(new ClientStatus(client.Name, status));
+                    clientStatus = new ClientStatus(name, status);
+                    await db.EstadoCliente.AddAsync(clientStatus);
                 }
                 else
                 {
                     clientStatus.Estado = status;
                     clientStatus.UltimaConexion = DateTime.Now;
+                    db.EtiquetasCliente.RemoveRange(clientStatus.Etiquetas);
+                    clientStatus.Etiquetas.Clear();
                 }
+
+                foreach (var d in diff)
+                {
+                    clientStatus.Etiquetas.Add(d);
+                }
+
                 await db.SaveChangesAsync();
 
                 return TypedResults.Ok(Enum.GetName(typeof(Status), status));
-            })
-            .WithName("PostValidarCliente")
-            .WithOpenApi();
+            });
 
-            app.MapPost("/multiplesinstalaciones", async (ClientStatusDb db, Request client, HttpContext context) =>
+            app.MapPost("/multiple-installations", async (ClientStatusDb db, Request client, HttpContext context) =>
             {
-                ClientStatus? clientStatus = db.Find(client.Name);
+                var name = (context.Connection.RemoteIpAddress is not null) ? context.Connection.RemoteIpAddress.ToString() : client.Name;
+
+                ClientStatus? clientStatus = db.EstadoCliente
+                    .Include(c => c.Etiquetas)
+                    .FirstOrDefault(c => c.Cliente == name);
+
                 if (clientStatus is null)
                 {
-                    await db.EstadoCliente.AddAsync(new ClientStatus(client.Name, Status.MultipleInstalaciones));
+                    await db.EstadoCliente.AddAsync(new ClientStatus(name, Status.MultipleInstalaciones));
                 }
                 else
                 {
                     clientStatus.Estado = Status.MultipleInstalaciones;
                     clientStatus.UltimaConexion = DateTime.Now;
+                    db.EtiquetasCliente.RemoveRange(clientStatus.Etiquetas);
+                    clientStatus.Etiquetas.Clear();
                 }
                 await db.SaveChangesAsync();
 
-                var commonpath = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                var path = Path.Combine(commonpath, LogFolder + client.Name);
+                var path = Path.Combine(Analysis.GetLogBasePath(), name);
 
                 Logger.Log(path, $"Se encontraron mas de una instalación de PiQuatro:{Environment.NewLine}{client.Message}");
 
                 return TypedResults.Ok(Enum.GetName(typeof(Status), Status.MultipleInstalaciones));
-            })
-            .WithName("PostMultiplesInstalaciones")
-            .WithOpenApi();
+            });
 
-            app.MapPost("/noinstalado", async (ClientStatusDb db, Request client, HttpContext context) =>
+            app.MapPost("/not-installed", async (ClientStatusDb db, Request client, HttpContext context) =>
             {
-                ClientStatus? clientStatus = db.Find(client.Name);
+                var name = (context.Connection.RemoteIpAddress is not null) ? context.Connection.RemoteIpAddress.ToString() : client.Name;
+
+                ClientStatus? clientStatus = db.EstadoCliente
+                    .Include(c => c.Etiquetas)
+                    .FirstOrDefault(c => c.Cliente == name);
+
                 if (clientStatus is null)
                 {
-                    await db.EstadoCliente.AddAsync(new ClientStatus(client.Name, Status.NoInstalado));
+                    await db.EstadoCliente.AddAsync(new ClientStatus(name, Status.NoInstalado));
                 }
                 else
                 {
                     clientStatus.Estado = Status.NoInstalado;
                     clientStatus.UltimaConexion = DateTime.Now;
+                    db.EtiquetasCliente.RemoveRange(clientStatus.Etiquetas);
+                    clientStatus.Etiquetas.Clear();
                 }
                 await db.SaveChangesAsync();
 
-                var commonpath = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                var path = Path.Combine(commonpath, LogFolder + client.Name);
+                var path = Path.Combine(Analysis.GetLogBasePath(), name);
 
                 Logger.Log(path, "No se encontro una instalación de PiQuatro.");
 
                 return TypedResults.Ok(Enum.GetName(typeof(Status), Status.NoInstalado));
-            })
-            .WithName("PostNoInstalado")
-            .WithOpenApi();
+            });
 
-            app.MapGet("/obtenercliente", async (string key, HttpContext context) =>
+            app.MapGet("/get-client", async (HttpContext context) =>
             {
-                if (key != authConfig.ClaveDescarga)
+                string? key = ResolveDownloadKey(context);
+                if (!AuthValidator.IsDownloadKeyValid(key, authConfig.ClaveDescarga))
                 {
-                    await context.Response.WriteAsync("Unauthorized");
                     return Results.Unauthorized();
                 }
 
                 var bytes = await File.ReadAllBytesAsync(Path.Combine(ClientFolder, ClientFile));
                 return Results.File(bytes, "application/vnd.microsoft.portable-executable", ClientFile);
-            })
-            .WithName("GetObtenerCliente")
-            .WithOpenApi();
+            });
 
-            app.MapGet("/instalador", async (string key, HttpContext context) =>
+            app.MapGet("/installer", async (HttpContext context) =>
             {
-                if (key != authConfig.ClaveDescarga)
+                string? key = ResolveDownloadKey(context);
+                if (!AuthValidator.IsDownloadKeyValid(key, authConfig.ClaveDescarga))
                 {
-                    await context.Response.WriteAsync("Unauthorized");
                     return Results.Unauthorized();
                 }
 
                 var bytes = await File.ReadAllBytesAsync(Path.Combine(ClientFolder, InstallerFile));
                 return Results.File(bytes, "text/plain", InstallerFile);
-            })
-            .WithName("GetInstalador")
-            .WithOpenApi();
+            });
 
-            app.MapGet("/clienteversion", () =>
+            app.MapGet("/client-version", () =>
             {
                 return TypedResults.Ok(clientWatch!.ClientHash);
-            })
-            .WithName("GetVersionCliente")
-            .WithOpenApi();
+            });
+
+            app.MapGet("/clients", async (ClientStatusDb db) =>
+            {
+                var clients = await db.EstadoCliente
+                    .AsNoTracking()
+                    .Include(c => c.Etiquetas)
+                    .OrderByDescending(c => c.UltimaConexion)
+                    .ToListAsync();
+                return TypedResults.Ok(clients);
+            });
 
             app.Run();
         }

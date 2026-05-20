@@ -1,38 +1,69 @@
+using Client.Options;
 using Client.Service;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Client
 {
-    public class Worker(ConfigService config) : BackgroundService
+    public sealed class Worker(
+        ClientService client,
+        IOptions<AppOptions> appOptions,
+        TimeProvider timeProvider,
+        ILogger<Worker> logger) : BackgroundService
     {
-        private readonly ClientService _client = new(config);
-        private static readonly Mutex s_mutPiQuatro = new(false, @"Local\PiQuatroMutx");
-        private static readonly Mutex s_mutEtiquetas = new(false, @"Local\EtiquetasMutx");
+        private readonly AppOptions _app = appOptions.Value;
+        private readonly SemaphoreSlim _etiquetasGate = new(1, 1);
+        private readonly SemaphoreSlim _piQuatroGate = new(1, 1);
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            try
+            {
+                await client.EnsurePiPathAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "EnsurePiPathAsync fallo durante el arranque");
+            }
+
             List<Task> tasks = [
-                Task.Run(() => CheckEtiquetas(stoppingToken), stoppingToken),
-                Task.Run(() => CheckPiQuatro(stoppingToken), stoppingToken),
-                Task.Run(() => CheckUpdates(stoppingToken), stoppingToken),
+                CheckEtiquetas(stoppingToken),
+                CheckPiQuatro(stoppingToken),
+                CheckUpdates(stoppingToken),
             ];
 
-            foreach (var task in tasks)
-            {
-                await task;
-            }
+            await Task.WhenAll(tasks);
         }
 
         private async Task CheckEtiquetas(CancellationToken stoppingToken)
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                s_mutEtiquetas.WaitOne();
-                _client.SendEtiquetas().Wait(stoppingToken);
-                s_mutEtiquetas.ReleaseMutex();
+                try
+                {
+                    await _etiquetasGate.WaitAsync(stoppingToken);
+                    try
+                    {
+                        await client.SendEtiquetas(stoppingToken);
+                    }
+                    finally
+                    {
+                        _etiquetasGate.Release();
+                    }
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "CheckEtiquetas fallo en una iteracion");
+                }
 
-                // Si el tiempo intervalo no fue configurado se asiga a 3 horas por default.
-                double interval = config.Data.App?.IntervaloMins ?? 180.0;
-                await Task.Delay(TimeSpan.FromMinutes(interval), stoppingToken);
+                // Si el tiempo intervalo no fue configurado se usa 5 minutos por default.
+                double interval = _app.IntervaloMins > 0 ? _app.IntervaloMins : 5.0;
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(interval), timeProvider, stoppingToken);
+                }
+                catch (OperationCanceledException) { return; }
             }
         }
 
@@ -40,14 +71,29 @@ namespace Client
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                // Calcula el tiempo que falta hasta las 2 de la mañana.
-                DateTime midnight = DateTime.Today.AddDays(1).AddHours(config.Data.App!.PiquatroTime);
-                double remaining = midnight.Subtract(DateTime.Now).TotalMinutes;
-                await Task.Delay(TimeSpan.FromMinutes(remaining), stoppingToken);
+                try
+                {
+                    await Task.Delay(TimeUntilNext(_app.PiquatroTime), timeProvider, stoppingToken);
+                }
+                catch (OperationCanceledException) { return; }
 
-                s_mutPiQuatro.WaitOne();
-                _client.CheckPiQuatroAsync().Wait(stoppingToken);
-                s_mutPiQuatro.ReleaseMutex();
+                try
+                {
+                    await _piQuatroGate.WaitAsync(stoppingToken);
+                    try
+                    {
+                        await client.CheckPiQuatroAsync(stoppingToken);
+                    }
+                    finally
+                    {
+                        _piQuatroGate.Release();
+                    }
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "CheckPiQuatro fallo en una iteracion");
+                }
             }
         }
 
@@ -55,19 +101,56 @@ namespace Client
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                // Calcula el tiempo que falta hasta la media noche.
-                DateTime midnight = DateTime.Today.AddDays(1).AddHours(config.Data.App!.UpdateTime);
-                double remaining = midnight.Subtract(DateTime.Now).TotalMinutes;
-                await Task.Delay(TimeSpan.FromMinutes(remaining), stoppingToken);
+                try
+                {
+                    await Task.Delay(TimeUntilNext(_app.UpdateTime), timeProvider, stoppingToken);
+                }
+                catch (OperationCanceledException) { return; }
 
-                s_mutEtiquetas.WaitOne();
-                s_mutPiQuatro.WaitOne();
-
-                _client.GetUpdate().Wait(stoppingToken);
-
-                s_mutPiQuatro.ReleaseMutex();
-                s_mutEtiquetas.ReleaseMutex();
+                try
+                {
+                    // Orden fijo: etiquetas -> piQuatro para evitar deadlock con los otros loops.
+                    await _etiquetasGate.WaitAsync(stoppingToken);
+                    try
+                    {
+                        await _piQuatroGate.WaitAsync(stoppingToken);
+                        try
+                        {
+                            await client.GetUpdate(stoppingToken);
+                        }
+                        finally
+                        {
+                            _piQuatroGate.Release();
+                        }
+                    }
+                    finally
+                    {
+                        _etiquetasGate.Release();
+                    }
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "CheckUpdates fallo en una iteracion");
+                }
             }
+        }
+
+        private TimeSpan TimeUntilNext(int hourOfDay) => TimeUntilNext(timeProvider, hourOfDay);
+
+        /// <summary>
+        /// Calcula cuanto falta hasta la proxima ocurrencia de <paramref name="hourOfDay"/> hs local.
+        /// Si el calculo da cero o negativo (por ejemplo en una llamada justo en el limite), devuelve
+        /// 1 minuto para evitar un loop ocioso.
+        /// </summary>
+        internal static TimeSpan TimeUntilNext(TimeProvider timeProvider, int hourOfDay)
+        {
+            DateTimeOffset now = timeProvider.GetLocalNow();
+            DateTimeOffset next = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset)
+                .AddDays(1)
+                .AddHours(hourOfDay);
+            TimeSpan remaining = next - now;
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.FromMinutes(1);
         }
     }
 }

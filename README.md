@@ -1,77 +1,160 @@
-# Visual Ternera Service (VSTS)
+# Canelary Service (VSTS)
+
 #### Es una solución para controlar en qué estado están las etiquetas que utiliza PiQuatro.
 
-Este proyecto esta dividido en dos programas:
-- *Client*, que es el Windows Service que estará funcionando en las máquinas de producción.
-- *Server*, que es el servidor que se comunicara con las maquinas en producción para analizar en qué estado están.
+Este proyecto está dividido en tres proyectos de .NET 10:
+
+- **Client** — Windows Service (`Microsoft.NET.Sdk.Worker`) que corre en las máquinas de producción.
+- **Server** — Web API (`Microsoft.NET.Sdk.Web`, Minimal API) que recibe los reportes de los clientes y los persiste en SQL Server.
+- **Core** — Biblioteca compartida con los DTOs y helpers comunes (HMAC, escaner de etiquetas, IP).
+- **Tests/Canelary.Tests** — Tests unitarios (xUnit) que cubren los componentes críticos.
+
+Para detalles internos del codigo (DI, options pattern, typed HTTP client, source-gen JSON, file logger, semaforos, DPAPI, etc.) ver [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Ejemplo:
-|Cliente|Descripcion|UltimaConexion|
-|---|---|---|
-|192.168.10.102|Archivos Sobrantes|2024-04-22 11:24:00|
-|192.168.42.25|Okay|2024-04-22 11:49:00|
-|192.168.78.25|Desactualizado|2024-04-22 11:50:00|
-|192.168.78.40|Multiples Instalaciones|2024-04-22 11:50:00|
-|192.168.28.4|Desactualizado y Sobrantes|2024-04-22 11:50:00|
-|192.168.10.25|Desactualizado|2024-04-19 16:26:00|
-|192.168.56.1|Archivos Sobrantes|2024-04-15 11:36:00|
 
+| Cliente        | Descripcion                | UltimaConexion      |
+| -------------- | -------------------------- | ------------------- |
+| 192.168.10.102 | Archivos Sobrantes         | 2024-04-22 11:24:00 |
+| 192.168.42.25  | Okay                       | 2024-04-22 11:49:00 |
+| 192.168.78.25  | Desactualizado             | 2024-04-22 11:50:00 |
+| 192.168.78.40  | Multiples Instalaciones    | 2024-04-22 11:50:00 |
+| 192.168.28.4   | Desactualizado y Sobrantes | 2024-04-22 11:50:00 |
+| 192.168.10.25  | Desactualizado             | 2024-04-19 16:26:00 |
+| 192.168.56.1   | Archivos Sobrantes         | 2024-04-15 11:36:00 |
 
-Instalación
-===
+---
+
+# Instalación
+
 ### • Servidor
+
 Para poder instalar el servidor es necesario contar con:
+
 - Un servidor http capaz de hospedar [aplicaciones ASP.NET](https://learn.microsoft.com/es-mx/aspnet/core/host-and-deploy/iis/?view=aspnetcore-8.0).
 - Una instancia de SQL Server capaz de utilizar [tablas en memoria](https://learn.microsoft.com/es-mx/sql/relational-databases/in-memory-oltp/requirements-for-using-memory-optimized-tables?view=sql-server-ver16#requirements).
 
-Para que el servidor pueda comunicarse con la base de datos, se necesita:
-1. Preparar la base de datos ejecutando el SQL script **'deploy_VSTS.sql'** ubicado en la carpeta raíz.
-2. Modificar la cadena de conexión **'DefaultConnection'** dentro de **_Server/appsettings.json_** para que se conecte con su servidor de base de datos.
-3. Asignar el rol **'vsts_server'** al usuario correspondiente.
+Para que el servidor pueda comunicarse con la base de datos:
+
+1. Preparar la base de datos ejecutando el SQL script **[deploy_VSTS.sql](deploy_VSTS.sql)** (raíz del repo).
+2. Modificar la cadena de conexión **DefaultConnection** dentro de [Server/appsettings.json](Server/appsettings.json) para que apunte a la base.
+3. Asignar el rol **vst_server** al usuario correspondiente.
+
+#### Configurar secretos sin tocar appsettings.json
+
+`Auth__ClavePublica`, `Auth__ClavePrivada` y `Auth__ClaveDescarga` pueden setearse como variables de entorno y sobreescriben los valores del `appsettings.json` (el host de ASP.NET aplica esa precedencia por defecto). En entornos productivos se recomienda dejar el bloque `"Auth"` vacio en el JSON y proveerlo via env vars.
+
+#### Healthcheck
+
+El servidor expone `GET /healthz` para monitoreo (no requiere auth, no cuenta para el rate limiter). Devuelve 200 si la conexion a la base de datos esta viva, 503 si no.
 
 ---
 
 ### • Cliente
+
 Para poder instalar el cliente es necesario contar con:
+
 - Una versión de Windows 10 1607+ o Windows 11 22000+, 64 bits.
 
-Para poder instalarlo se necesita ejecutar el script **'installer.ps1'** como administrador.
+Para instalar, ejecutar el script **[Client/installer.ps1](Client/installer.ps1)** como administrador.
 
+#### Encriptado de secretos en reposo
 
-Funcionamiento
-===
+A partir de la primera ejecucion el archivo `C:\ProgramData\Canelary Service\appsettings.json` se reescribe con la seccion `Auth` cifrada via Windows DPAPI (`DataProtectionScope.LocalMachine`). Los tres campos quedan como base64 ciphertext y el flag `"Encrypted": true` marca el estado.
+
+Si se edita el archivo manualmente y se ponen las claves en plaintext (con `"Encrypted": false`), el servicio las leera y las migrara automaticamente al siguiente `Save()`.
+
+> :warning: Si se reinstala Windows o se cambia la maquina, las claves cifradas no se podran leer y hay que regenerar el `appsettings.json` (borrarlo y dejar que el servicio escriba el default plaintext, o restaurar desde un backup que estuviera en plaintext).
+
+---
+
+# Funcionamiento
+
 ### • Cliente
-> :warning: La primera vez que se ejecuta el servicio realizara un análisis para encontrar PiQuatro, en caso de no encontrarlo o encontrar múltiples, el cliente enviara el reporte al servidor y finalizara.
 
-El servicio de **cliente** realiza tres tipos de análisis diarios.
-1. Envía al servidor una lista de etiquetas encontradas en PiQuatro, indicando nombre y hash. Esto se realiza cada N minutos, donde N es un valor configurable, por defecto _'180'_ minutos.
-2. Reporta al servidor si se encontró más de una, o ninguna, instalación de PiQuatro en el sistema. Para mejorar el rendimiento de este análisis, solamente se realiza la búsqueda en una unidad de disco configurable, por defecto en _'C:'_. Este análisis se realiza a una cierta hora del día, también configurable.
-3. Consulta al servidor si hay alguna actualización del cliente pendiente, en caso de haberla el mismo servicio realizara la actualización. Esta consulta también se realiza a una cierta hora del día configurable.
+> :warning: La primera vez que se ejecuta el servicio realiza un análisis para encontrar PiQuatro. Si no encuentra ninguna instalación, o encuentra múltiples, envia un reporte al servidor y entra en estado degradado (sigue corriendo, pero no enviara etiquetas hasta que se resuelva).
 
-> El archivo de configuración se encuentra en la unidad principal _'C:\ProgramData\Visual Ternera Service\config.toml'_
+El servicio realiza tres tareas en paralelo dentro de un mismo `BackgroundService`:
 
-Junto al archivo de configuración se encuentra la carpeta _'Logs'_, todo error que encuentre el servicio será reportado ahí, separado en un archivo por día, subdividido por hora.
+1. **CheckEtiquetas** — envia al servidor la lista de archivos `.e01` encontrados en el directorio de PiQuatro, con nombre y hash SHA-256. Cada N minutos (default `IntervaloMins=5`).
+2. **CheckPiQuatro** — analiza si hay multiples o ninguna instalacion de PiQuatro en la unidad configurada (default `C:`). Una vez al dia a la hora `PiquatroTime` (default 02:00).
+3. **CheckUpdates** — consulta `/client-version`; si el hash del `Client.exe` local difiere, descarga `installer.ps1` y se auto-actualiza. Una vez al dia a la hora `UpdateTime` (default 00:00).
+
+Las tres tareas comparten dos `SemaphoreSlim` para evitar pisarse durante la auto-actualizacion. Los errores transitorios en cualquier iteracion se loguean y el loop continua.
+
+> El archivo de configuración esta en `C:\ProgramData\Canelary Service\appsettings.json`. Los logs en `C:\ProgramData\Canelary Service\Logs\yyyy_MM_dd.log`.
 
 ---
 
 ### • Servidor
-Una vez iniciado el servidor, se puede consultar las APIs disponibles mediante el enlace **'http\://{hostname}:{port}/swagger'**
 
-El servidor escucha y responde a las peticiones realizada por los clientes mediante una comunicación de tipo _API REST_.
-Todo reporte de estado que es recibido por un cliente es publicado en la base de datos, en la tabla **[service].[EstadoCliente]** y es detallado en un archivo log.
+Una vez iniciado se puede consultar la API en `http://{hostname}:{port}/swagger` y el healthcheck en `/healthz`.
 
-> Estos archivos logs se encuentran en la unidad principal _'C:\ProgramData\Visual Ternera Server\'_, separados en una carpeta por cliente, un archivo por día, subdivido por hora.
+El servidor escucha y responde a las peticiones de los clientes via _API REST_ (Minimal API). Cada reporte se persiste en la tabla `[service].[EstadoCliente]` (memory-optimized) y se detalla en archivos log.
 
-> Cualquier error interno que encuentre el servidor, es reportado en el Visor de Eventos de Windows.
+> Logs en `C:\ProgramData\Canelary Server\{cliente}\yyyy_MM_dd.log`.
 
-El servidor está limitado a solamente recibir 100 peticiones cada 10 minutos.
+> Errores internos -> Visor de Eventos de Windows.
+
+Esta limitado a **100 peticiones cada 10 minutos** por la fixed-window rate limiter. El endpoint `/healthz` esta exento.
 
 ---
 
 ### • Autenticación
-La comunicación entre servidor-cliente es validada mediante un método de autenticación. <br/>
-En donde, el cliente le envía al servidor una llave privada encriptada por una llave pública y la llave pública. Y el servidor valida que sean las mismas llaves que el autorizo en el archivo de configuración **_Server/appsettings.json_**.
 
-Para el cliente las llaves se pueden configurar en _'C:\ProgramData\Visual Ternera Service\config.toml'_.
+**Reportes (POST `/validate-client`, `/multiple-installations`)**: el cliente firma cada request con HMAC-SHA256 usando `ClavePublica` como mensaje y `ClavePrivada` como clave, y envia los headers:
 
-> Para poder bajar el instalador o el cliente desde el servidor, también se necesita ingresar una clave en la URI de la siguiente forma: **'http\://{hostname}:{port}/instalador?key={clave}'**
+```
+request-key:  <ClavePublica>
+request-hash: <base64(HMAC-SHA256(ClavePrivada, ClavePublica))>
+```
+
+El servidor recomputa el hash y lo compara en **tiempo constante** (`CryptographicOperations.FixedTimeEquals`). El POST `/not-installed` no requiere auth (es solo telemetria).
+
+**Descargas (GET `/get-client`, `/installer`)**: la clave de descarga se manda en `Authorization: Bearer <ClaveDescarga>`. El servidor sigue aceptando `?key=<ClaveDescarga>` como fallback transitorio para no romper clientes ya desplegados (el `installer.ps1` actual todavia usa ese esquema).
+
+Las tres claves se configuran en:
+
+- Server: `appsettings.json` seccion `"Auth"` o env vars `Auth__ClavePublica` etc.
+- Client: `C:\ProgramData\Canelary Service\appsettings.json` seccion `"Auth"` (cifrada via DPAPI a partir del primer arranque).
+
+#### HTTPS
+
+El esquema HTTP/HTTPS del cliente es configurable via `"Server.Scheme"` en el JSON del cliente (default `"http"`). Para migrar a HTTPS:
+
+1. En el server: configurar un binding TLS en Kestrel (via `appsettings.json` -> `Kestrel:Endpoints:Https`) y descomentar `app.UseHttpsRedirection()` en [Server/Server.cs](Server/Server.cs).
+2. En cada cliente: setear `"Server": { "Scheme": "https", ... }` en el JSON.
+3. Eventualmente: cerrar el binding HTTP del server una vez que todos los clientes hayan migrado.
+
+---
+
+# Desarrollo
+
+### Requisitos
+
+- .NET SDK 10.0.201+ (verificar con `dotnet --version`).
+- Visual Studio 2022 17.13+, Rider 2025.1+ o VS Code con extension C#.
+
+### Build + tests
+
+```powershell
+# Compilar todo en Release
+dotnet build Service.sln -c Release
+
+# Compilar tratando warnings de async como errores (igual que CI)
+dotnet build Service.sln -c Release /warnaserror:CS4014,CS8618,CS1998
+
+# Correr la suite de tests (36 tests, ~100ms)
+dotnet test Service.sln -c Release
+```
+
+### CI
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) corre dos jobs en paralelo:
+
+- **build-and-test-linux** (`ubuntu-latest`) — job primario, porque el Server productivo corre en Linux. El Client targetea `net10.0-windows` pero compila gracias a `<EnableWindowsTargeting>true</EnableWindowsTargeting>` en su csproj. Los tests de DPAPI (`SecretProtectorTests`) se auto-saltean en non-Windows.
+- **build-and-test-windows** (`windows-latest`) — valida que el Client y los tests DPAPI corran sobre su target real.
+
+Ambos jobs hacen: `dotnet restore` → `dotnet build -c Release /warnaserror:CS4014,CS8618,CS1998` → `dotnet test` con `XPlat Code Coverage` → upload de `TestResults/` como artifact. Ambos deben pasar para que un PR sea mergeable.
+
+Para que `Analysis.CheckClient` no intente escribir en `/usr/share` en Linux, el job de Linux setea la env var `CANELARY_SERVER_LOG_BASE=${{ runner.temp }}/canelary-server-logs` que redirige los logs por-cliente a una carpeta del runner.

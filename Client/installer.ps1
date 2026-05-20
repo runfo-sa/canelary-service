@@ -1,13 +1,14 @@
-﻿# Instalador para el Servicio controlador de etiquetas de Visual Ternera
+﻿# Instalador para el Servicio controlador de etiquetas de Canelary
 # Autor: Agustin Marco <agustin.marco@runfo.com.ar>
 
 $ServiceName = "VSTC"
-$DisplayName = "Visual Ternera - Controlador de Etiquetas"
-$FolderPath = "C:\soft\Visual Ternera\Service\"
-$FilePath = "C:\soft\Visual Ternera\Service\Client.exe"
+$DisplayName = "Canelary - Controlador de Etiquetas"
+$FolderPath = "C:\soft\Canelary\Service\"
+$FilePath = "C:\soft\Canelary\Service\Client.exe"
+$Uri = "http://localhost:5262/get-client?key={0}" -f $env:Auth__ClaveDescarga
 
 New-Item -ItemType Directory -Force -Path $FolderPath
-Invoke-WebRequest http://rafatest.runfosa.local:8089/obtenercliente?key=ABC123 -OutFile $FilePath
+Invoke-WebRequest -Uri $Uri -OutFile $FilePath
 
 $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($Service -eq $null)

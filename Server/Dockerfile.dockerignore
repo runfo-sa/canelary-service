@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+**/TestResults/
+**/*.user
+.git/
+.github/
+.vs/
+.idea/
+.vscode/
+Client/
+Tests/
+README.md
+ARCHITECTURE.md
+deploy_VSTS.sql

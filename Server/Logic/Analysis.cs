@@ -8,12 +8,25 @@ namespace Server.Logic
     public static class Analysis
     {
         /// <summary>
+        /// Base path para los logs por-cliente. Default: <c>CommonApplicationData/Canelary Server</c>.
+        /// El env var <c>CANELARY_SERVER_LOG_BASE</c> permite overrideo (lo usan los tests para
+        /// no escribir en <c>/usr/share</c> en CI Linux).
+        /// </summary>
+        internal static string GetLogBasePath() => Path.Combine(
+            Environment.GetEnvironmentVariable("CANELARY_SERVER_LOG_BASE")
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "Canelary Server");
+
+        /// <summary>
         /// Función que compara la lista de <see cref="Etiqueta"/> del cliente con las del servidor.
         /// <br/>
         /// Analiza en busca de archivos faltantes, sobrantes o distintos.
         /// </summary>
-        /// <returns><see cref="Status"/> - Estado del cliente</returns>
-        public static Status CheckClient(Request client, FrozenSet<Etiqueta> serverEtiquetas)
+        /// <returns>
+        /// <see cref="Status"/> - Estado del cliente, junto con la lista de etiquetas
+        /// que difieren (faltantes o sobrantes) para persistir en la DB.
+        /// </returns>
+        public static (Status Status, List<EtiquetaCliente> Diff) CheckClient(Request client, FrozenSet<Etiqueta> serverEtiquetas)
         {
             FrozenSet<Etiqueta> clientEtiquetas = client.Etiquetas!.ToFrozenSet();
 
@@ -31,10 +44,11 @@ namespace Server.Logic
                 ((desactualizadas.IsNullOrEmpty()) ? Status.Sobrantes : Status.DesactualizadaSobrantes)
                 : ((desactualizadas.IsNullOrEmpty()) ? Status.Okay : Status.Desactualizada);
 
+            var diff = new List<EtiquetaCliente>();
+
             if (status != Status.Okay)
             {
-                var commonpath = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                var path = Path.Combine(commonpath, "Visual Ternera Server\\" + client.Name);
+                var path = Path.Combine(GetLogBasePath(), client.Name);
 
                 string list = (sobrantes is not null && status == Status.Sobrantes) ?
                     $"Sobrantes:{Environment.NewLine}" + string.Join(Environment.NewLine, sobrantes) : (sobrantes is not null) ?
@@ -45,9 +59,25 @@ namespace Server.Logic
                     : $"Desactualizadas:{Environment.NewLine}" + string.Join(Environment.NewLine, desactualizadas);
 
                 Logger.Log(path, list);
+
+                if (status is Status.Desactualizada or Status.DesactualizadaSobrantes)
+                {
+                    foreach (var e in desactualizadas)
+                    {
+                        diff.Add(new EtiquetaCliente(e.Name, TipoDiff.Desactualizada));
+                    }
+                }
+
+                if (sobrantes is not null)
+                {
+                    foreach (var e in sobrantes)
+                    {
+                        diff.Add(new EtiquetaCliente(e.Name, TipoDiff.Sobrante));
+                    }
+                }
             }
 
-            return status;
+            return (status, diff);
         }
     }
 }

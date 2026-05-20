@@ -79,10 +79,10 @@ TO FILEGROUP ' + QUOTENAME(@MODName);
 END
 GO
 
-CREATE DATABASE VisualTernera
+CREATE DATABASE Canelary
 GO
 
-USE VisualTernera
+USE Canelary
 GO
 
 CREATE SCHEMA service
@@ -103,8 +103,18 @@ CREATE TABLE [service].[EstadoCliente] (
     [Cliente]           VARCHAR (16)  NOT NULL,
     [Estado]            TINYINT       NOT NULL,
     [UltimaConexion]    SMALLDATETIME NOT NULL,
-    CONSTRAINT [PK_EstadoCliente] PRIMARY KEY NONCLUSTERED ([Id] ASC),
-    INDEX [IX_Unique_EstadoCliente] UNIQUE NONCLUSTERED ([Cliente])
+    CONSTRAINT [PK_EstadoCliente] PRIMARY KEY NONCLUSTERED ([Id] ASC)
+)
+WITH (MEMORY_OPTIMIZED = ON);
+GO
+
+CREATE TABLE [service].[EtiquetaCliente] (
+    [Id]               INT           IDENTITY (1, 1) NOT NULL,
+    [EstadoClienteId]  INT           NOT NULL,
+    [Nombre]           VARCHAR (128) NOT NULL,
+    [Tipo]             TINYINT       NOT NULL,
+    CONSTRAINT [PK_EtiquetaCliente] PRIMARY KEY NONCLUSTERED ([Id] ASC),
+    INDEX [IX_EtiquetaCliente_EstadoClienteId] NONCLUSTERED ([EstadoClienteId])
 )
 WITH (MEMORY_OPTIMIZED = ON);
 GO
@@ -120,11 +130,13 @@ VALUES (
 )
 GO
 
-CREATE ROLE vsts_server
+CREATE ROLE vst_server
 GO
 
-GRANT SELECT ON service.Estado TO vsts_server;
-
-GRANT SELECT ON service.EstadoCliente TO vsts_server;
-GRANT INSERT ON service.EstadoCliente TO vsts_server;
-GRANT UPDATE ON service.EstadoCliente TO vsts_server;
+GRANT SELECT ON service.Estado TO vst_server;
+GRANT SELECT ON service.EstadoCliente TO vst_server;
+GRANT INSERT ON service.EstadoCliente TO vst_server;
+GRANT UPDATE ON service.EstadoCliente TO vst_server;
+GRANT SELECT ON service.EtiquetaCliente TO vst_server;
+GRANT INSERT ON service.EtiquetaCliente TO vst_server;
+GRANT DELETE ON service.EtiquetaCliente TO vst_server;

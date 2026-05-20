@@ -1,19 +1,27 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk.Worker">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-Client-b3a3b325-0b9d-407d-8e33-e4aa5cb0e1e5</UserSecretsId>
+    <!-- Permite restaurar/compilar net10.0-windows en hosts Linux/Mac (necesario para CI en ubuntu-latest).
+         No afecta el runtime: el binario solo corre como Windows Service en Windows. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
 	<FileVersion>1.0.0.0</FileVersion>
 	<AssemblyVersion>1.0.0.0</AssemblyVersion>
 	<Description>Servicio encargado de informar al Servidor del estado de Etiquetas</Description>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
-    <PackageReference Include="Tomlyn" Version="0.17.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Canelary.Tests" />
   </ItemGroup>
 
   <ItemGroup>
@@ -21,9 +29,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="config.toml">
-      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
-    </None>
     <None Update="installer.ps1">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>

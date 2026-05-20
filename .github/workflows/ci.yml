@@ -1,0 +1,192 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # Job primario: linux porque el Server productivo corre ahi.
+  # El Client targetea net10.0-windows pero compila gracias a <EnableWindowsTargeting>.
+  # Los tests de DPAPI (SecretProtectorTests) se auto-saltean en non-Windows.
+  build-and-test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      - name: Restore
+        run: dotnet restore Service.sln
+
+      - name: Build
+        run: dotnet build Service.sln -c Release --no-restore /warnaserror:CS4014,CS8618,CS1998
+
+      - name: Test
+        # Redirige los logs por-cliente de Analysis a una carpeta del runner, asi no se intentan
+        # crear en /usr/share (no escribible).
+        env:
+          CANELARY_SERVER_LOG_BASE: ${{ runner.temp }}/canelary-server-logs
+        run: dotnet test Service.sln -c Release --no-build --logger trx --collect:"XPlat Code Coverage" --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-linux
+          path: TestResults
+
+  # Job en Windows: valida que el Client se compile y empaquete sobre su target real, y corre
+  # los tests de DPAPI que en Linux se auto-saltean.
+  build-and-test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      - name: Restore
+        run: dotnet restore Service.sln
+
+      - name: Build
+        run: dotnet build Service.sln -c Release --no-restore /warnaserror:CS4014,CS8618,CS1998
+
+      - name: Test
+        run: dotnet test Service.sln -c Release --no-build --logger trx --collect:"XPlat Code Coverage" --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-windows
+          path: TestResults
+
+  # Build de la WebApp: si la SPA no compila, el deploy va a fallar en la fase docker.
+  # Detectarlo aca evita rebuilds completos del stack en la VM productiva.
+  build-webapp:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: WebApp
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: WebApp/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+  # Deploy de Server + WebApp como stack de docker-compose en una VM Linux en red privada.
+  # El self-hosted runner corre dentro de la VM (label `canelary-prod`), asi que
+  # los builds de imagen y `docker compose up` ocurren localmente; no hace falta
+  # registry ni VPN. Solo se dispara en push a main, despues de que pasen los tests.
+  deploy:
+    needs: [build-and-test-linux, build-and-test-windows, build-webapp]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, canelary-prod]
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    env:
+      # docker-compose lee estos del environment del proceso (preferido sobre .env
+      # porque evita escribir secrets a disco en el runner).
+      CANELARY_DB_CONNECTION: ${{ secrets.CANELARY_DB_CONNECTION }}
+      CANELARY_AUTH_CLAVE_PUBLICA: ${{ secrets.CANELARY_AUTH_CLAVE_PUBLICA }}
+      CANELARY_AUTH_CLAVE_PRIVADA: ${{ secrets.CANELARY_AUTH_CLAVE_PRIVADA }}
+      CANELARY_AUTH_CLAVE_DESCARGA: ${{ secrets.CANELARY_AUTH_CLAVE_DESCARGA }}
+      SERVER_HOST_PORT: "5262"
+      WEBAPP_HOST_PORT: "8080"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build images
+        run: docker compose build --pull
+
+      - name: Tag images with commit SHA
+        # Permite rollback rapido a una version anterior sin re-buildear.
+        run: |
+          docker tag canelary-server:local canelary-server:${{ github.sha }}
+          docker tag canelary-webapp:local canelary-webapp:${{ github.sha }}
+
+      - name: Start stack
+        run: docker compose up -d --no-build --remove-orphans
+
+      - name: Wait for server health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:${SERVER_HOST_PORT}/healthz" >/dev/null; then
+              echo "Server is healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Server healthcheck failed after 60s. Container logs:"
+          docker compose logs server
+          exit 1
+
+      - name: Wait for webapp health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:${WEBAPP_HOST_PORT}/healthz" >/dev/null; then
+              echo "WebApp is healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "WebApp healthcheck failed after 60s. Container logs:"
+          docker compose logs webapp
+          exit 1
+
+      - name: Smoke test reverse proxy
+        # La WebApp debe poder llegar al Server via su /clients endpoint. Si esto
+        # falla pero los healthchecks individuales pasaron, hay un problema de red
+        # o de configuracion de nginx.
+        run: |
+          curl -fsS -o /dev/null -w "%{http_code}" "http://localhost:${WEBAPP_HOST_PORT}/clients" | \
+            grep -E '^(200|401|403)$' || {
+              echo "Reverse proxy /clients devolvio status inesperado."
+              docker compose logs webapp server
+              exit 1
+            }
+
+      - name: Prune old images
+        if: always()
+        run: docker image prune -f --filter "until=168h"

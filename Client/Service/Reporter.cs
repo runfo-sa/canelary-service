@@ -6,11 +6,11 @@ namespace Client.Service
     {
         private static readonly string FOLDER_PATH = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "Visual Ternera Service\\Logs\\"
+            "Canelary Service\\Logs\\"
         );
 
         /// <summary>
-        /// Escribe un <paramref name="msg"/> atravez del <see cref="Logger"/>, en la dirección AppData\VisualTerneraService.
+        /// Escribe un <paramref name="msg"/> atravez del <see cref="Logger"/>, en la dirección AppData\CanelaryService.
         /// <br/>
         /// Abre el explorador de archivos con el log seleccionado.
         /// </summary>

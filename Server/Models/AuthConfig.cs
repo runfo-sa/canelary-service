@@ -2,8 +2,8 @@
 {
     public class AuthConfig
     {
-        public string ClavePublica { get; set; }
-        public string ClavePrivada { get; set; }
-        public string ClaveDescarga { get; set; }
+        public required string ClavePublica { get; set; }
+        public required string ClavePrivada { get; set; }
+        public required string ClaveDescarga { get; set; }
     }
 }

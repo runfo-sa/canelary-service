@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.ComponentModel.DataAnnotations.Schema;
 
@@ -18,6 +18,8 @@ namespace Server.Models
         public string Cliente { get; set; }
         public Status Estado { get; set; }
         public DateTime UltimaConexion { get; set; }
+
+        public List<EtiquetaCliente> Etiquetas { get; set; } = new();
 
         public ClientStatus(string Cliente, Status Estado, DateTime UltimaConexion)
         {
@@ -39,17 +41,64 @@ namespace Server.Models
         }
     }
 
+    public enum TipoDiff : byte
+    {
+        Desactualizada = 0,
+        Sobrante = 1
+    }
+
+    /// <summary>
+    /// Etiqueta que difiere entre cliente y servidor: faltante (Desactualizada) o no esperada (Sobrante).
+    /// </summary>
+    [PrimaryKey(nameof(Id))]
+    public class EtiquetaCliente
+    {
+        [DatabaseGenerated(DatabaseGeneratedOption.Identity)]
+        public int Id { get; set; }
+        public int EstadoClienteId { get; set; }
+        public string Nombre { get; set; }
+        public TipoDiff Tipo { get; set; }
+
+        public EtiquetaCliente(string Nombre, TipoDiff Tipo)
+        {
+            this.Nombre = Nombre;
+            this.Tipo = Tipo;
+        }
+
+        public EtiquetaCliente(int EstadoClienteId, string Nombre, TipoDiff Tipo)
+        {
+            this.EstadoClienteId = EstadoClienteId;
+            this.Nombre = Nombre;
+            this.Tipo = Tipo;
+        }
+    }
+
     /// <summary>
     /// Instancia de conexión con una base de datos para la tabla de <see cref="ClientStatus"/>
     /// </summary>
     public class ClientStatusDb(DbContextOptions options) : DbContext(options)
     {
         public DbSet<ClientStatus> EstadoCliente { get; set; } = null!;
+        public DbSet<EtiquetaCliente> EtiquetasCliente { get; set; } = null!;
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
-            modelBuilder.Entity<ClientStatus>().ToTable(b => b.IsMemoryOptimized());
             modelBuilder.HasDefaultSchema("service");
+
+            modelBuilder.Entity<ClientStatus>(e =>
+            {
+                e.ToTable(b => b.IsMemoryOptimized());
+                e.HasMany(c => c.Etiquetas)
+                    .WithOne()
+                    .HasForeignKey(et => et.EstadoClienteId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<EtiquetaCliente>(e =>
+            {
+                e.ToTable("EtiquetaCliente", b => b.IsMemoryOptimized());
+                e.HasIndex(et => et.EstadoClienteId);
+            });
         }
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)

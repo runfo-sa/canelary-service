@@ -1,0 +1,59 @@
+# docker-compose para Server + WebApp en una red privada compartida.
+# Las env vars sensibles vienen de un archivo .env (no commiteado).
+# Ver Server/DEPLOY.md para el set completo de secrets.
+#
+# Uso:
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose down
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Server/Dockerfile
+    image: canelary-server:local
+    container_name: canelary-server
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      CANELARY_SERVER_LOG_BASE: /var/log/canelary-server
+      ConnectionStrings__DefaultConnection: ${CANELARY_DB_CONNECTION}
+      Auth__ClavePublica: ${CANELARY_AUTH_CLAVE_PUBLICA}
+      Auth__ClavePrivada: ${CANELARY_AUTH_CLAVE_PRIVADA}
+      Auth__ClaveDescarga: ${CANELARY_AUTH_CLAVE_DESCARGA}
+    volumes:
+      - /var/log/canelary-server:/var/log/canelary-server
+    ports:
+      # Acceso directo opcional al Server desde el host (para debug / clients fuera de docker)
+      - "${SERVER_HOST_PORT:-5262}:8080"
+    networks:
+      - canelary
+    # Nota: la imagen aspnet:10.0 no trae curl/wget, asi que el healthcheck
+    # se hace contra el contenedor de nginx (que si los tiene). El nginx no
+    # arranca trafico hasta que el Server responda al primer proxy_pass.
+
+  webapp:
+    build:
+      context: ./WebApp
+      dockerfile: Dockerfile
+    image: canelary-webapp:local
+    container_name: canelary-webapp
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "${WEBAPP_HOST_PORT:-8080}:80"
+    networks:
+      - canelary
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  canelary:
+    driver: bridge

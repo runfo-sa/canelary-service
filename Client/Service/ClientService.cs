@@ -1,106 +1,74 @@
-﻿using Core;
 using System.Diagnostics;
 using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
+using Client.Options;
+using Core;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Client.Service
 {
     /// <summary>
-    /// Servicio principal, se encarga de reportar toda la información necesaria al Servidor.
+    /// Orquesta la logica del cliente: descubrir PiQuatro, enviar etiquetas, auto-actualizarse.
+    /// El transporte HTTP esta delegado a <see cref="ICanelaryApi"/>.
     /// </summary>
-    public sealed class ClientService
+    public sealed class ClientService(
+        ICanelaryApi api,
+        ConfigService config,
+        IOptions<AuthOptions> authOptions,
+        ILogger<ClientService> logger)
     {
-        internal class HttpClientHandlerInsecure : HttpClientHandler
+        private readonly string _ip = Network.GetIpAddress();
+        private readonly AuthOptions _auth = authOptions.Value;
+        private string[] _foundInstallations = [];
+
+        public async Task EnsurePiPathAsync(CancellationToken cancellationToken = default)
         {
-            internal HttpClientHandlerInsecure()
+            if (config.Data.App!.PiPath is not null)
             {
-                ServerCertificateCustomValidationCallback = DangerousAcceptAnyServerCertificateValidator;
+                return;
             }
-        }
 
-        private readonly JsonSerializerOptions _jsonOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-        };
-
-        private readonly string _ip = null!;
-        private string[] _foundInstallations = null!;
-        private readonly ConfigService _config = null!;
-        private readonly HttpClient _client = new(new HttpClientHandlerInsecure());
-
-        public ClientService(ConfigService config)
-        {
-            _config = config;
-
-            // Busca la IPv4 de esta maquina
-            _ip = Network.GetIpAddress();
-
-            if (config.Data.App!.PiPath is null)
+            try
             {
-                _ = CheckPiQuatroAsync();
+                await CheckPiQuatroAsync(cancellationToken);
             }
+            catch (MultipleInstalls) { /* Ya reportado dentro de CheckPiQuatroAsync. */ }
+            catch (NoInstallsFound) { /* Ya reportado dentro de CheckPiQuatroAsync. */ }
         }
 
-        public async Task SendEtiquetas()
+        public async Task SendEtiquetas(CancellationToken cancellationToken = default)
         {
-            Etiqueta[] etiquetas = Scanner.GetEtiquetas(_config.Data.App!.PiPath!);
-            await Post("/validarcliente", etiquetas);
+            Etiqueta[] etiquetas = Scanner.GetEtiquetas(config.Data.App!.PiPath!);
+            await api.ValidateClientAsync(new Request(_ip, etiquetas), cancellationToken);
         }
 
-        public async Task SendMultipleInstalls()
+        public Task SendMultipleInstalls(CancellationToken cancellationToken = default)
         {
-            await Post("/multiplesinstalaciones", msg: string.Join(Environment.NewLine, _foundInstallations));
+            string msg = string.Join(Environment.NewLine, _foundInstallations);
+            return api.ReportMultipleInstallationsAsync(new Request(_ip, Etiquetas: null, Message: msg), cancellationToken);
         }
 
-        public async Task SendNoInstalls()
+        public Task SendNoInstalls(CancellationToken cancellationToken = default)
         {
-            await Post("/noinstalado");
+            return api.ReportNotInstalledAsync(new Request(_ip, Etiquetas: null), cancellationToken);
         }
 
-        /// <summary>
-        /// Realiza una API Request del tipo POST al endpoint indicado.
-        /// <br/>
-        /// Las lista de etiquetas es opcional.
-        /// </summary>
-        private async Task Post(string route, Etiqueta[]? etiquetas = null, string? msg = null)
+        public async Task CheckPiQuatroAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                StringContent jsonBody = new(
-                    JsonSerializer.Serialize(new Request(_ip, etiquetas, msg), _jsonOptions),
-                    Encoding.ASCII,
-                    "application/json"
-                );
-
-                jsonBody.Headers.Add("request-key", _config.Data.Auth!.ClavePublica);
-                jsonBody.Headers.Add("request-hash", Encryption.EncryptKey(_config.Data.Auth!.ClavePublica, _config.Data.Auth!.ClavePrivada));
-
-                string uri = $"http://{_config.Data.Server!.Ip}:{_config.Data.Server!.Port}{route}";
-                HttpResponseMessage response = await _client.PostAsync(uri, jsonBody);
-                response.EnsureSuccessStatusCode();
-            }
-            catch (Exception err)
-            {
-                Reporter.ReportError(err.Message);
-            }
-        }
-
-        public async Task CheckPiQuatroAsync()
-        {
-            try
-            {
-                _config.Data.App!.PiPath = FindPiQuatro(_config.Data.App.Unidad);
-                _config.Save();
+                string piPath = FindPiQuatro(config.Data.App!.Unidad);
+                config.Data.App!.PiPath = piPath;
+                config.Save();
             }
             catch (MultipleInstalls)
             {
-                await SendMultipleInstalls();
+                await SendMultipleInstalls(cancellationToken);
                 throw;
             }
             catch (NoInstallsFound)
             {
-                await SendNoInstalls();
+                await SendNoInstalls(cancellationToken);
                 throw;
             }
         }
@@ -108,79 +76,78 @@ namespace Client.Service
         /// <summary>
         /// Busca la instalación de <b>PiQuatro</b> en la <paramref name="unidad"/> de disco especificada.
         /// </summary>
-        /// <returns>Dirección donde PiQuatro guarda las etiquetas</returns>
         /// <exception cref="NoInstallsFound"/>
         /// <exception cref="MultipleInstalls"/>
         private string FindPiQuatro(string unidad)
         {
-            DateTime date = DateTime.Now;
+            DateTime cutoff = DateTime.Now.AddYears(-1);
             _foundInstallations = Array.FindAll(
                 Directory.GetFiles(unidad + "\\", "PiQuatro.exe", new EnumerationOptions
                 {
                     IgnoreInaccessible = true,
                     RecurseSubdirectories = true,
                 }),
-                f => File.GetLastWriteTime(f) > date.AddYears(-1) && !f.Contains("test", StringComparison.CurrentCultureIgnoreCase)
+                f => File.GetLastWriteTime(f) > cutoff && !f.Contains("test", StringComparison.CurrentCultureIgnoreCase)
             );
 
-            if (_foundInstallations.Length == 0)
+            return _foundInstallations.Length switch
             {
-                throw new NoInstallsFound();
-            }
-            else if (_foundInstallations.Length > 1)
-            {
-                throw new MultipleInstalls(_foundInstallations);
-            }
-
-            return Directory.GetParent(_foundInstallations[0])!.FullName + "\\Etiquetas";
+                0 => throw new NoInstallsFound(),
+                1 => Directory.GetParent(_foundInstallations[0])!.FullName + "\\Etiquetas",
+                _ => throw new MultipleInstalls(_foundInstallations),
+            };
         }
 
-        private class NoInstallsFound() : Exception("No se encontro ninguna instalación de PiQuatro")
-        { }
-
-        private class MultipleInstalls(string[] paths) : Exception("Se encontraron mas de una instalación de PiQuatro")
-        {
-            public string[] Paths = paths;
-        }
-
-        public async Task GetUpdate()
+        public async Task GetUpdate(CancellationToken cancellationToken = default)
         {
             try
             {
-                string uri = $"http://{_config.Data.Server!.Ip}:{_config.Data.Server!.Port}/clienteversion";
-                HttpResponseMessage response = await _client.GetAsync(uri);
+                string serverHash = (await api.GetClientVersionAsync(cancellationToken)).Trim('"');
+
+                string clientExePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Client.exe");
+                byte[] localHashBytes;
+                await using (var clientStream = File.OpenRead(clientExePath))
+                {
+                    localHashBytes = await SHA256.HashDataAsync(clientStream, cancellationToken);
+                }
+                string localHash = Scanner.GetHashString(localHashBytes);
+
+                if (localHash == serverHash)
+                {
+                    return;
+                }
+
+                using HttpResponseMessage response = await api.DownloadInstallerAsync(_auth.ClaveDescarga, cancellationToken);
                 response.EnsureSuccessStatusCode();
 
-                string serverHash = await response.Content.ReadAsStringAsync();
-                string localHash = Scanner.GetHashString(SHA256.HashData(File.ReadAllBytes(AppDomain.CurrentDomain.BaseDirectory + "Client.exe")));
+                string filename = response.Content.Headers.ContentDisposition!.FileName!;
+                string path = Path.Combine(Path.GetTempPath(), "VSTCTemp");
+                string filepath = Path.Combine(path, filename);
+                Directory.CreateDirectory(path);
 
-                if (localHash != serverHash.Trim('"'))
+                await using (var fs = new FileStream(filepath, FileMode.Create))
                 {
-                    uri = $"http://{_config.Data.Server!.Ip}:{_config.Data.Server!.Port}/instalador?key={_config.Data.Auth!.ClaveDescarga}";
-                    response = _client.GetAsync(uri).GetAwaiter().GetResult();
-                    response.EnsureSuccessStatusCode();
-
-                    string filename = response.Content.Headers.ContentDisposition!.FileName!;
-                    string path = Path.Combine(Path.GetTempPath(), "VSTCTemp");
-                    string filepath = Path.Combine(path, filename);
-                    Directory.CreateDirectory(path);
-
-                    using (var fs = new FileStream(filepath, FileMode.Create))
-                    {
-                        response.Content.CopyToAsync(fs).GetAwaiter().GetResult();
-                    }
-
-                    using var process = new Process();
-                    process.StartInfo = new ProcessStartInfo("powershell.exe", $"-ExecutionPolicy Bypass -File \"{filepath}\"");
-                    process.Start();
-
-                    Environment.Exit(0);
+                    await response.Content.CopyToAsync(fs, cancellationToken);
                 }
+
+                using var process = new Process();
+                process.StartInfo = new ProcessStartInfo("powershell.exe", $"-ExecutionPolicy Bypass -File \"{filepath}\"");
+                process.Start();
+
+                logger.LogInformation("Actualizacion descargada, iniciando installer.ps1 y terminando proceso");
+                Environment.Exit(0);
             }
             catch (Exception err)
             {
-                Reporter.ReportError(err.Message);
+                logger.LogError(err, "Fallo durante GetUpdate");
             }
+        }
+
+        private sealed class NoInstallsFound() : Exception("No se encontro ninguna instalación de PiQuatro");
+
+        private sealed class MultipleInstalls(string[] paths) : Exception("Se encontraron mas de una instalación de PiQuatro")
+        {
+            public string[] Paths { get; } = paths;
         }
     }
 }

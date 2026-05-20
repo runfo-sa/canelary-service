@@ -1,12 +1,9 @@
-﻿using System.Security.Cryptography;
-using System.Text;
+using System.Security.Cryptography;
 
 namespace Core
 {
     public static class Scanner
     {
-        private static readonly HashAlgorithm hasher = SHA256.Create();
-
         /// <summary>
         /// Escanea <paramref name="path"/> en busca de archivos de etiquetas (con extension '.e01')
         /// </summary>
@@ -18,10 +15,11 @@ namespace Core
 
             for (int i = 0; i < files.Length; i++)
             {
-                var f = files[i];
+                string f = files[i];
 
                 string name = Path.GetFileNameWithoutExtension(f).ToLower();
-                string hash = GetHashString(hasher.ComputeHash(File.ReadAllBytes(f)));
+                using FileStream fs = File.OpenRead(f);
+                string hash = GetHashString(SHA256.HashData(fs));
 
                 etiquetas[i] = new Etiqueta(hash, name);
             }
@@ -32,14 +30,6 @@ namespace Core
         /// <summary>
         /// Convierte una array de <see cref="byte"/> en una <see cref="string"/> hexadecimal
         /// </summary>
-        public static string GetHashString(byte[] bytes)
-        {
-            StringBuilder sb = new();
-            foreach (byte b in bytes)
-            {
-                sb.Append(b.ToString("X2"));
-            }
-            return sb.ToString();
-        }
+        public static string GetHashString(byte[] bytes) => Convert.ToHexString(bytes);
     }
 }
