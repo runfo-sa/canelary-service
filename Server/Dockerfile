@@ -30,6 +30,13 @@ RUN dotnet publish Client/Client.csproj -c Release --no-restore -r win-x64 --sel
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
+
+# Microsoft.Data.SqlClient carga libgssapi_krb5.so.2 al abrir conexiones a SQL Server
+# (incluso con SQL auth, no solo Trusted_Connection). La imagen aspnet:10.0 no la trae.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgssapi-krb5-2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app/publish ./
 COPY --from=build /app/client-repo/Client.exe ./client-repo/Client.exe
 COPY --from=build /app/client-repo/installer.ps1 ./client-repo/installer.ps1
