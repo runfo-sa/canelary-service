@@ -39,9 +39,23 @@ export function usePollingClients(intervalSeconds: PollingInterval) {
   }, [])
 
   useEffect(() => {
-    refresh()
-    return () => abortRef.current?.abort()
-  }, [refresh])
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    fetchClients(controller.signal)
+      .then((data) => {
+        if (controller.signal.aborted) return
+        setState({ data, loading: false, error: null, lastFetch: new Date() })
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return
+        const message = err instanceof Error ? err.message : "Error desconocido"
+        setState((s) => ({ ...s, loading: false, error: message }))
+      })
+
+    return () => controller.abort()
+  }, [])
 
   useEffect(() => {
     if (intervalSeconds === 0) return
