@@ -49,6 +49,12 @@ namespace Server
                 .BindConfiguration("Auth")
                 .ValidateOnStart();
 
+            // Path al share de Etiquetas. En Windows dev es la ruta UNC; en Linux/Docker
+            // se override via Etiquetas__Path apuntando al bind-mount del share SMB.
+            builder.Services.AddOptions<EtiquetasConfig>()
+                .BindConfiguration("Etiquetas")
+                .ValidateOnStart();
+
             // JSON source generators para los DTOs compartidos via Core.
             builder.Services.ConfigureHttpJsonOptions(o =>
                 o.SerializerOptions.TypeInfoResolverChain.Insert(0, CanelaryJsonContext.Default));
@@ -77,8 +83,12 @@ namespace Server
             builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
                 p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
-            // Watchers singleton
-            builder.Services.AddSingleton<WatcherPiQuatro>();
+            // Snapshot de Etiquetas mantenido por un BackgroundService que polea el share
+            // a intervalos fijos. Se reemplazo el FileSystemWatcher original porque inotify
+            // sobre CIFS no propaga eventos remotos (ver EtiquetasPollingService).
+            builder.Services.AddSingleton(TimeProvider.System);
+            builder.Services.AddSingleton<EtiquetasSnapshot>();
+            builder.Services.AddHostedService<EtiquetasPollingService>();
             builder.Services.AddSingleton(new WatcherClient(ClientFolder, ClientFile));
 
             // Limita la cantidad de pedidos a 100 cada 5 minutos
@@ -106,7 +116,7 @@ namespace Server
             app.MapHealthChecks("/healthz").DisableRateLimiting();
 
             var authConfig = app.Services.GetRequiredService<IOptions<AuthConfig>>().Value;
-            var piQuatroWatch = app.Services.GetService<WatcherPiQuatro>();
+            var etiquetasSnapshot = app.Services.GetRequiredService<EtiquetasSnapshot>();
             var clientWatch = app.Services.GetService<WatcherClient>();
 
             app.Use(async (context, next) =>
@@ -137,7 +147,7 @@ namespace Server
             // API Endpoints:
             app.MapPost("/validate-client", async (ClientStatusDb db, Request client, HttpContext context) =>
             {
-                (Status status, List<EtiquetaCliente> diff) = Analysis.CheckClient(client, piQuatroWatch!.ServerEtiquetas);
+                (Status status, List<EtiquetaCliente> diff) = Analysis.CheckClient(client, etiquetasSnapshot.Current);
                 var name = (context.Connection.RemoteIpAddress is not null) ? context.Connection.RemoteIpAddress.ToString() : client.Name;
 
                 ClientStatus? clientStatus = db.EstadoCliente

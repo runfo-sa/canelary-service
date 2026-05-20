@@ -94,6 +94,58 @@ sudo mkdir -p /var/log/canelary-server
 sudo chown gh-runner:gh-runner /var/log/canelary-server
 ```
 
+### 1.4 Montar el share SMB de Etiquetas
+
+El Server lee la carpeta de Etiquetas desde `\\twinssrv\Twins\PiQuatro\Etiquetas`. Esa es una ruta UNC de Windows que Linux no entiende directamente: hay que **montar el share CIFS en el host** y bind-montearlo al contenedor. El [`docker-compose.yml`](docker-compose.yml) ya expone `/mnt/etiquetas` como `:ro` dentro del contenedor y setea `Etiquetas__Path=/mnt/etiquetas`.
+
+Pasos one-time en la VM:
+
+```bash
+# 1. cifs-utils para soporte de mount.cifs
+sudo apt-get install -y cifs-utils
+
+# 2. Crear el mountpoint (vacio, el mount lo va a llenar)
+sudo mkdir -p /mnt/etiquetas
+```
+
+Crear `/etc/cifs-credentials` con la cuenta AD de servicio que puede leer el share. Usar una cuenta dedicada (no la de un usuario humano) y darle solo permisos de lectura sobre `\\twinssrv\Twins\PiQuatro\Etiquetas`.
+
+```bash
+sudo tee /etc/cifs-credentials >/dev/null <<'EOF'
+username=svc-canelary
+password=<password-de-la-cuenta>
+domain=<DOMINIO-AD>
+EOF
+sudo chmod 600 /etc/cifs-credentials
+sudo chown root:root /etc/cifs-credentials
+```
+
+Resolver el UID/GID con el que va a leer el container. La imagen `aspnet:10.0` corre como root por default (UID 0), asi que `uid=0,gid=0` alcanza. Si en el futuro se cambia a un usuario no-root, ajustar estos valores al UID/GID del usuario dentro del contenedor.
+
+Agregar a `/etc/fstab`:
+
+```fstab
+//twinssrv/Twins/PiQuatro/Etiquetas  /mnt/etiquetas  cifs  credentials=/etc/cifs-credentials,uid=0,gid=0,ro,nofail,_netdev,iocharset=utf8,vers=3.0  0  0
+```
+
+- `ro` — read-only desde la VM (el Server solo lee).
+- `nofail` — no bloquear el boot si el share esta caido.
+- `_netdev` — esperar la red antes de intentar montar.
+- `vers=3.0` — forzar SMB 3 (mas seguro que 1.0; subir a `3.1.1` si el servidor lo soporta).
+
+Montar y verificar:
+
+```bash
+sudo mount -a
+ls /mnt/etiquetas        # debe listar los .e01
+mount | grep etiquetas   # debe aparecer como cifs
+```
+
+Si el mount falla, las pistas mas comunes:
+- `Permission denied` → credenciales o permisos NTFS en el share.
+- `mount error(112): Host is down` → versiones SMB incompatibles; probar `vers=2.1`, `vers=3.1.1`.
+- `mount error(13): Permission denied` y SElinux/AppArmor activo → revisar contexto de seguridad del mountpoint.
+
 ---
 
 ## 2. Instalar el GitHub Actions self-hosted runner
@@ -333,6 +385,7 @@ El `location ~` de [`WebApp/nginx.conf`](WebApp/nginx.conf) lista los endpoints 
 - [ ] Docker Engine + docker-compose-plugin instalados y funcionales
 - [ ] Usuario `gh-runner` en grupo `docker`
 - [ ] Volumen `canelary-logs` o `/var/log/canelary-server` listo
+- [ ] Share SMB de Etiquetas montado en `/mnt/etiquetas` (entrada en `/etc/fstab`, credenciales en `/etc/cifs-credentials`)
 - [ ] Runner registrado con label `canelary-prod` y corriendo como servicio
 - [ ] SQL auth habilitado en el servidor SQL
 - [ ] Usuario `canelary_app` creado con permisos sobre `VisualTernera`
