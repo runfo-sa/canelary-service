@@ -95,7 +95,9 @@ namespace Server.Logic
             HashCode hc = default;
             // EnumerateFiles devuelve un orden no garantizado entre filesystems; ordenamos
             // por nombre para que el fingerprint sea estable iteracion a iteracion.
-            foreach (FileInfo fi in new DirectoryInfo(path).EnumerateFiles("*.e01").OrderBy(f => f.Name, StringComparer.Ordinal))
+            foreach (FileInfo fi in new DirectoryInfo(path)
+                .EnumerateFiles("*.e01", new EnumerationOptions { MatchCasing = MatchCasing.CaseInsensitive })
+                .OrderBy(f => f.Name, StringComparer.Ordinal))
             {
                 hc.Add(fi.Name);
                 hc.Add(fi.Length);

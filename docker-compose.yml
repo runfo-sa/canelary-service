@@ -18,6 +18,7 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
+      TZ: America/Argentina/Buenos_Aires
       CANELARY_SERVER_LOG_BASE: /var/log/canelary-server
       ConnectionStrings__DefaultConnection: ${CANELARY_DB_CONNECTION}
       Auth__ClavePublica: ${CANELARY_AUTH_CLAVE_PUBLICA}

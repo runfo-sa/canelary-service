@@ -10,7 +10,10 @@ namespace Core
         /// <param name="path">Dirección a escanear</param>
         public static Etiqueta[] GetEtiquetas(string path)
         {
-            string[] files = Directory.GetFiles(path, "*.e01");
+            string[] files = Directory.GetFiles(path, "*.e01", new EnumerationOptions
+            {
+                MatchCasing = MatchCasing.CaseInsensitive,
+            });
             Etiqueta[] etiquetas = new Etiqueta[files.Length];
 
             for (int i = 0; i < files.Length; i++)
