@@ -17,7 +17,18 @@ namespace Client.Service
         IOptions<AuthOptions> authOptions,
         ILogger<ClientService> logger)
     {
-        private readonly string _ip = Network.GetIpAddress();
+        // Lazy para que un fallo de red al determinar la IP no rompa la construccion del singleton
+        // (lo que dejaba al servicio Windows en Error 1067 sin lograr inicializar el logger).
+        private readonly Lazy<string> _ipLazy = new(() =>
+        {
+            try { return Network.GetIpAddress(); }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "No se pudo determinar la IP local; usando fallback 127.0.0.1");
+                return "127.0.0.1";
+            }
+        });
+        private string _ip => _ipLazy.Value;
         private readonly AuthOptions _auth = authOptions.Value;
         private string[] _foundInstallations = [];
 

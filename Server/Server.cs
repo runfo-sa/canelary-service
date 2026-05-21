@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Server.Logic;
 using Server.Models;
 using Server.Serialization;
+using System.Diagnostics;
 using System.Net;
 using System.Threading.RateLimiting;
 
@@ -33,6 +34,31 @@ namespace Server
                 }
             }
             return context.Request.Query["key"];
+        }
+
+        // Diagnostico para investigar la lentitud de la cola en /get-client e /installer.
+        // El tiempo se mide desde que entra el handler hasta que Kestrel termina de flushear
+        // la respuesta (incluye back-pressure del cliente), permitiendo distinguir si la cola
+        // es del servidor o del cliente (AV/disco/red).
+        private static void LogDownloadCompletion(HttpContext context, ILoggerFactory loggerFactory, string endpoint, string filePath)
+        {
+            var logger = loggerFactory.CreateLogger("Server.Downloads");
+            var sw = Stopwatch.StartNew();
+            long fileSize = 0;
+            try { fileSize = new FileInfo(filePath).Length; } catch { }
+            var remote = context.Connection.RemoteIpAddress?.ToString() ?? "?";
+            var ua = context.Request.Headers.UserAgent.ToString();
+
+            context.Response.OnCompleted(() =>
+            {
+                sw.Stop();
+                var ms = sw.ElapsedMilliseconds;
+                var mbps = ms > 0 ? (fileSize / 1024.0 / 1024.0) / (ms / 1000.0) : 0;
+                logger.LogInformation(
+                    "{Endpoint} done elapsed={Elapsed}ms status={Status} bytes={Bytes} throughput={Throughput:F2}MB/s remote={Remote} ua={UA}",
+                    endpoint, ms, context.Response.StatusCode, fileSize, mbps, remote, ua);
+                return Task.CompletedTask;
+            });
         }
 
         public static void Run(string[] args)
@@ -240,7 +266,7 @@ namespace Server
                 return TypedResults.Ok(Enum.GetName(typeof(Status), Status.NoInstalado));
             });
 
-            app.MapGet("/get-client", async (HttpContext context) =>
+            app.MapGet("/get-client", (HttpContext context, ILoggerFactory loggerFactory) =>
             {
                 string? key = ResolveDownloadKey(context);
                 if (!AuthValidator.IsDownloadKeyValid(key, authConfig.ClaveDescarga))
@@ -248,11 +274,16 @@ namespace Server
                     return Results.Unauthorized();
                 }
 
-                var bytes = await File.ReadAllBytesAsync(Path.Combine(ClientFolder, ClientFile));
-                return Results.File(bytes, "application/vnd.microsoft.portable-executable", ClientFile);
+                var path = Path.Combine(AppContext.BaseDirectory, ClientFolder, ClientFile);
+                LogDownloadCompletion(context, loggerFactory, "get-client", path);
+                return Results.File(
+                    path,
+                    contentType: "application/vnd.microsoft.portable-executable",
+                    fileDownloadName: ClientFile,
+                    enableRangeProcessing: true);
             });
 
-            app.MapGet("/installer", async (HttpContext context) =>
+            app.MapGet("/installer", (HttpContext context, ILoggerFactory loggerFactory) =>
             {
                 string? key = ResolveDownloadKey(context);
                 if (!AuthValidator.IsDownloadKeyValid(key, authConfig.ClaveDescarga))
@@ -260,8 +291,13 @@ namespace Server
                     return Results.Unauthorized();
                 }
 
-                var bytes = await File.ReadAllBytesAsync(Path.Combine(ClientFolder, InstallerFile));
-                return Results.File(bytes, "text/plain", InstallerFile);
+                var path = Path.Combine(AppContext.BaseDirectory, ClientFolder, InstallerFile);
+                LogDownloadCompletion(context, loggerFactory, "installer", path);
+                return Results.File(
+                    path,
+                    contentType: "text/plain",
+                    fileDownloadName: InstallerFile,
+                    enableRangeProcessing: true);
             });
 
             app.MapGet("/client-version", () =>

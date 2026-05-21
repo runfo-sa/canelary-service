@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Client;
 using Client.Logging;
 using Client.Options;
@@ -7,12 +8,22 @@ using Microsoft.Extensions.Options;
 
 internal class Program
 {
+    private const string ServiceName = "Canelary - Controlador de Etiquetas";
+
     private static void Main(string[] args)
     {
         try
         {
             var builder = Host.CreateApplicationBuilder(args);
-            builder.Services.AddWindowsService(options => options.ServiceName = "Canelary - Controlador de Etiquetas");
+            builder.Services.AddWindowsService(options => options.ServiceName = ServiceName);
+
+            // Logging registrado ANTES del resto del DI, para que cualquier excepcion al construir
+            // singletons (ConfigService, ClientService, etc.) caiga en el archivo y en el EventLog
+            // que AddWindowsService engancha automaticamente.
+            var logFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "Canelary Service", "Logs");
+            builder.Logging.AddProvider(new FileLoggerProvider(logFolder));
 
             // ConfigService sigue siendo la fuente de verdad para el archivo JSON con comentarios.
             builder.Services.AddSingleton<ConfigService>();
@@ -52,12 +63,6 @@ internal class Program
                 });
             });
 
-            // Logging: file + event log (Windows Service).
-            var logFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "Canelary Service", "Logs");
-            builder.Logging.AddProvider(new FileLoggerProvider(logFolder));
-
             // Typed HttpClient con resilience handler y el AuthHeaderHandler delegating handler.
             builder.Services.AddTransient<AuthHeaderHandler>();
             builder.Services.AddHttpClient<ICanelaryApi, CanelaryApiClient>((sp, http) =>
@@ -83,7 +88,17 @@ internal class Program
         }
         catch (Exception ex)
         {
-            Reporter.ReportError(ex.ToString());
+            // Cualquier excepcion durante DI/host build se reporta a multiples canales para
+            // que jamas caiga en silencio (sintoma original del Error 1067 sin logs).
+            try { Reporter.ReportError(ex.ToString()); } catch { }
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    EventLog.WriteEntry(ServiceName, ex.ToString(), EventLogEntryType.Error);
+                }
+            }
+            catch { }
             Environment.Exit(1);
         }
     }
