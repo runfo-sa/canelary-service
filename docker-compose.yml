@@ -49,6 +49,8 @@ services:
       - server
     ports:
       - "${WEBAPP_HOST_PORT:-8080}:80"
+    volumes:
+      - ./WebApp/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks:
       - canelary
     healthcheck:
