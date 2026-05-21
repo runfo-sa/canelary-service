@@ -25,9 +25,13 @@ Este documento describe los pasos **one-time** que hay que hacer en la VM para q
         |                           |
    canelary-server            canelary-webapp
    (aspnet:10.0)              (nginx:alpine)
-   host :5262                 host :8080
+   host :5262                 (sin puerto en host)
         |                           |
-        |   red interna docker      |
+        |                           v
+        |                   Traefik (host :80)
+        |                   Host=canelary.runfosa.local
+        |                           |
+        |   red interna docker      |   red traefik-public
         +-------- canelary ---------+
                       |
                       v
@@ -35,7 +39,8 @@ Este documento describe los pasos **one-time** que hay que hacer en la VM para q
 ```
 
 - **`canelary-server`**: API en .NET 10. Escucha en `:8080` dentro del contenedor, publicada al host en `:5262`. Conecta a SQL Server via la red privada de la VM.
-- **`canelary-webapp`**: SPA React servida por nginx. Escucha en `:80` dentro del contenedor, publicada al host en `:8080`. Hace reverse proxy de los endpoints del backend al servicio `canelary-server` por la red docker interna (ver [`WebApp/nginx.conf`](WebApp/nginx.conf)).
+- **`canelary-webapp`**: SPA React servida por nginx. Escucha en `:80` dentro del contenedor; **no publica puerto al host**. Se accede a traves de Traefik, que la rutea en el entrypoint `web` (host :80) cuando el `Host` header matchea `canelary.runfosa.local` (ver labels en [`docker-compose.yml`](docker-compose.yml)). Hace reverse proxy de los endpoints del backend al servicio `canelary-server` por la red docker interna `canelary` (ver [`WebApp/nginx.conf`](WebApp/nginx.conf)).
+- **Traefik**: corre por fuera de este stack y es duenio de la red docker externa `traefik-public`. La WebApp se une a esa red para que Traefik la descubra via las labels.
 - Los **Clients** Windows siguen llamando al Server directamente por `http://<vm>:5262`, en paralelo al acceso de la WebApp.
 
 ---
@@ -69,7 +74,25 @@ sudo docker run hello-world
 sudo docker compose version    # debe imprimir Docker Compose version v2.x
 ```
 
-### 1.2 Crear el usuario que corre el runner
+### 1.2 Tener Traefik corriendo con la red `traefik-public`
+
+La WebApp se publica a la red de la VM a traves de **Traefik**, que se despliega por fuera de este stack y es duenio de una red docker externa llamada `traefik-public`. El `docker-compose.yml` de este repo asume que esa red ya existe y que hay un Traefik escuchando en el entrypoint `web` (host :80).
+
+Crear la red una sola vez si todavia no existe:
+
+```bash
+docker network create traefik-public
+```
+
+Verificar:
+
+```bash
+docker network inspect traefik-public >/dev/null && echo OK
+```
+
+El job `deploy` del workflow chequea esto en su primer step (`Verify traefik-public network exists`) y aborta con un mensaje claro si la red falta. Si tambien hace falta levantar Traefik desde cero, hacerlo antes del primer push a `main` — su configuracion concreta esta fuera del alcance de este documento.
+
+### 1.3 Crear el usuario que corre el runner
 
 Por seguridad, no usar `root` para el runner. Crear un usuario dedicado:
 
@@ -85,7 +108,7 @@ sudo -iu gh-runner docker ps
 sudo -iu gh-runner docker compose version
 ```
 
-### 1.3 Crear el directorio de logs persistente
+### 1.4 Crear el directorio de logs persistente
 
 Los logs del Server (escritos via `CANELARY_SERVER_LOG_BASE`) se montan como volumen para sobrevivir redeploys. El `docker-compose.yml` usa un volumen named (`canelary-logs`) por defecto; si preferis bind-mount al filesystem del host:
 
@@ -94,7 +117,7 @@ sudo mkdir -p /var/log/canelary-server
 sudo chown gh-runner:gh-runner /var/log/canelary-server
 ```
 
-### 1.4 Montar el share SMB de Etiquetas
+### 1.5 Montar el share SMB de Etiquetas
 
 El Server lee la carpeta de Etiquetas desde `\\twinssrv\Twins\PiQuatro\Etiquetas`. Esa es una ruta UNC de Windows que Linux no entiende directamente: hay que **montar el share CIFS en el host** y bind-montearlo al contenedor. El [`docker-compose.yml`](docker-compose.yml) ya expone `/mnt/etiquetas` como `:ro` dentro del contenedor y setea `Etiquetas__Path=/mnt/etiquetas`.
 
@@ -245,7 +268,10 @@ En el repo, **Settings → Secrets and variables → Actions → New repository 
 
 Los valores se pueden tomar del `appsettings.json` de produccion o del keystore que use el equipo. **No** commitear estos valores en el repo.
 
-Los puertos publicados al host (`SERVER_HOST_PORT=5262`, `WEBAPP_HOST_PORT=8080`) estan hardcodeados en el workflow porque no son sensibles; si hay que cambiarlos, editar [`ci.yml`](.github/workflows/ci.yml).
+Otros valores no-sensibles del workflow estan hardcodeados en [`ci.yml`](.github/workflows/ci.yml):
+
+- `SERVER_HOST_PORT=5262` — puerto publicado del Server al host (lo usan los Clients Windows directamente).
+- `WEBAPP_HOST=canelary.runfosa.local` — Host header con el que el workflow chequea la WebApp via Traefik. Debe matchear la regla `traefik.http.routers.canelary.rule` en [`docker-compose.yml`](docker-compose.yml).
 
 ---
 
@@ -253,30 +279,32 @@ Los puertos publicados al host (`SERVER_HOST_PORT=5262`, `WEBAPP_HOST_PORT=8080`
 
 Con todo lo anterior listo, basta con hacer push a `main`. El job `deploy` se va a tomar el runner `canelary-prod` y va a:
 
-1. Buildear las imagenes `canelary-server:local` y `canelary-webapp:local` con `docker compose build`.
-2. Taggear ambas con el SHA del commit para rollback posterior.
-3. Levantar el stack con `docker compose up -d --no-build --remove-orphans`.
-4. Pollear `http://localhost:5262/healthz` y `http://localhost:8080/healthz` durante 60s cada uno.
-5. Smoke test del reverse proxy: `curl http://localhost:8080/clients` debe devolver 200/401/403.
+1. Validar que la red externa `traefik-public` exista en el host (si no, aborta con mensaje claro).
+2. Buildear las imagenes `canelary-server:local` y `canelary-webapp:local` con `docker compose build`.
+3. Taggear ambas con el SHA del commit para rollback posterior.
+4. Levantar el stack con `docker compose up -d --no-build --remove-orphans`.
+5. Pollear `http://localhost:5262/healthz` (Server, puerto directo) durante 60s.
+6. Pollear `http://localhost/healthz` con header `Host: canelary.runfosa.local` (WebApp via Traefik) durante 60s.
+7. Smoke test del reverse proxy: `curl -H "Host: canelary.runfosa.local" http://localhost/clients` debe devolver 200/401/403.
 
 Si cualquier healthcheck falla, vuelca logs y aborta el deploy. Como `docker compose up` ya levanto el stack nuevo y bajo el viejo (los `container_name` chocan), un fallo de healthcheck deja la VM con el stack nuevo roto. **Hacer rollback manual** segun la seccion 6.
 
 Verificar manualmente despues del primer deploy:
 
 ```bash
-docker compose ps                           # ambos servicios "Up X seconds (healthy)"
-curl http://localhost:5262/healthz          # Server: "Healthy"
-curl http://localhost:8080/healthz          # WebApp: "ok"
-curl http://localhost:8080/                 # debe devolver el HTML de la SPA
-curl http://localhost:8080/clients          # via reverse proxy, debe devolver JSON o 401
-docker compose logs --tail 50               # sin excepciones de DB ni de filesystem
+docker compose ps                                                          # ambos servicios "Up X seconds (healthy)"
+curl http://localhost:5262/healthz                                         # Server: "Healthy"
+curl -H "Host: canelary.runfosa.local" http://localhost/healthz            # WebApp via Traefik: "ok"
+curl -H "Host: canelary.runfosa.local" http://localhost/                   # SPA HTML
+curl -H "Host: canelary.runfosa.local" http://localhost/clients            # JSON o 401 (reverse proxy a Server)
+docker compose logs --tail 50                                              # sin excepciones de DB ni de filesystem
 ```
 
-Desde otra maquina de la red privada:
+Desde otra maquina de la red privada (asume DNS interno apuntando `canelary.runfosa.local` a la VM):
 
 ```bash
-curl http://<vm-ip>:5262/healthz            # acceso directo al Server (Clients lo usan)
-curl http://<vm-ip>:8080/                   # WebApp en el browser
+curl http://<vm-ip>:5262/healthz             # acceso directo al Server (Clients lo usan)
+curl http://canelary.runfosa.local/          # WebApp via Traefik en el browser
 ```
 
 ---
@@ -327,7 +355,6 @@ export CANELARY_AUTH_CLAVE_PUBLICA="..."
 export CANELARY_AUTH_CLAVE_PRIVADA="..."
 export CANELARY_AUTH_CLAVE_DESCARGA="..."
 export SERVER_HOST_PORT=5262
-export WEBAPP_HOST_PORT=8080
 docker compose up -d --no-build
 ```
 
@@ -364,11 +391,15 @@ docker volume prune -f                      # borra volumenes huerfanos (no toca
 
 ## 7. Cambios comunes
 
-### Cambiar el puerto publicado de la WebApp
+### Cambiar el Host de la WebApp en Traefik
 
-1. Editar el bloque `env:` del job `deploy` en [`ci.yml`](.github/workflows/ci.yml), cambiar `WEBAPP_HOST_PORT`.
-2. Si el firewall de la VM filtra puertos, abrir el nuevo y cerrar el viejo.
-3. Push a `main`.
+La WebApp ya no expone puerto al host; se la matchea por `Host` header en Traefik. Para cambiar el dominio (ej. de `canelary.runfosa.local` a otro):
+
+1. Editar la label `traefik.http.routers.canelary.rule` en [`docker-compose.yml`](docker-compose.yml).
+2. Editar `server_name` en [`WebApp/nginx.conf`](WebApp/nginx.conf) para que coincida (no es estrictamente necesario para que funcione, pero evita confusion).
+3. Editar `WEBAPP_HOST` en el bloque `env:` del job `deploy` en [`ci.yml`](.github/workflows/ci.yml) — los healthchecks usan ese header.
+4. Actualizar el DNS interno para que el nuevo nombre resuelva a la VM.
+5. Push a `main`.
 
 ### Agregar un nuevo endpoint al Server
 
@@ -383,6 +414,7 @@ El `location ~` de [`WebApp/nginx.conf`](WebApp/nginx.conf) lista los endpoints 
 ## 8. Checklist resumido
 
 - [ ] Docker Engine + docker-compose-plugin instalados y funcionales
+- [ ] Red docker externa `traefik-public` creada y Traefik corriendo, publicando el entrypoint `web` en host :80
 - [ ] Usuario `gh-runner` en grupo `docker`
 - [ ] Volumen `canelary-logs` o `/var/log/canelary-server` listo
 - [ ] Share SMB de Etiquetas montado en `/mnt/etiquetas` (entrada en `/etc/fstab`, credenciales en `/etc/cifs-credentials`)
@@ -391,7 +423,8 @@ El `location ~` de [`WebApp/nginx.conf`](WebApp/nginx.conf) lista los endpoints 
 - [ ] Usuario `canelary_app` creado con permisos sobre `VisualTernera`
 - [ ] Conectividad VM → SQL Server validada (puerto 1433)
 - [ ] Los 4 secrets cargados en GitHub
-- [ ] Puertos 5262 y 8080 abiertos en el firewall de la VM (segun politica de red interna)
+- [ ] Puerto 5262 abierto en el firewall de la VM (Clients Windows); puerto 80 abierto si la WebApp se accede desde fuera de la VM (segun politica de red interna)
+- [ ] DNS interno: `canelary.runfosa.local` resuelve a la IP de la VM
 - [ ] Push de prueba a `main` corre exitoso de punta a punta
-- [ ] `curl http://<vm-ip>:8080/` devuelve el HTML de la SPA
-- [ ] `curl http://<vm-ip>:8080/clients` devuelve datos del backend via reverse proxy
+- [ ] `curl -H "Host: canelary.runfosa.local" http://<vm-ip>/` devuelve el HTML de la SPA
+- [ ] `curl -H "Host: canelary.runfosa.local" http://<vm-ip>/clients` devuelve datos del backend via reverse proxy
