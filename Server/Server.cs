@@ -36,6 +36,17 @@ namespace Server
             return context.Request.Query["key"];
         }
 
+        // Normaliza RemoteIpAddress al dotted IPv4. Kestrel bindeando en `http://+:8080`
+        // expone un socket dual-stack en Linux, asi que conexiones IPv4 llegan como
+        // `::ffff:10.x.x.x` (>15 chars) y desbordan la columna VARCHAR(16) en EstadoCliente.
+        private static string ResolveClientName(HttpContext context, Request fallback)
+        {
+            var remote = context.Connection.RemoteIpAddress;
+            if (remote is null) return fallback.Name;
+            if (remote.IsIPv4MappedToIPv6) remote = remote.MapToIPv4();
+            return remote.ToString();
+        }
+
         // Diagnostico para investigar la lentitud de la cola en /get-client e /installer.
         // El tiempo se mide desde que entra el handler hasta que Kestrel termina de flushear
         // la respuesta (incluye back-pressure del cliente), permitiendo distinguir si la cola
@@ -181,7 +192,7 @@ namespace Server
             app.MapPost("/validate-client", async (ClientStatusDb db, Request client, HttpContext context) =>
             {
                 (Status status, List<EtiquetaCliente> diff) = Analysis.CheckClient(client, etiquetasSnapshot.Current);
-                var name = (context.Connection.RemoteIpAddress is not null) ? context.Connection.RemoteIpAddress.ToString() : client.Name;
+                var name = ResolveClientName(context, client);
 
                 ClientStatus? clientStatus = db.EstadoCliente
                     .Include(c => c.Etiquetas)
@@ -212,7 +223,7 @@ namespace Server
 
             app.MapPost("/multiple-installations", async (ClientStatusDb db, Request client, HttpContext context) =>
             {
-                var name = (context.Connection.RemoteIpAddress is not null) ? context.Connection.RemoteIpAddress.ToString() : client.Name;
+                var name = ResolveClientName(context, client);
 
                 ClientStatus? clientStatus = db.EstadoCliente
                     .Include(c => c.Etiquetas)
@@ -240,7 +251,7 @@ namespace Server
 
             app.MapPost("/not-installed", async (ClientStatusDb db, Request client, HttpContext context) =>
             {
-                var name = (context.Connection.RemoteIpAddress is not null) ? context.Connection.RemoteIpAddress.ToString() : client.Name;
+                var name = ResolveClientName(context, client);
 
                 ClientStatus? clientStatus = db.EstadoCliente
                     .Include(c => c.Etiquetas)
