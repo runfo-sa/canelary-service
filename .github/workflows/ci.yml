@@ -10,7 +10,6 @@ on:
 jobs:
   # Job primario: linux porque el Server productivo corre ahi.
   # El Client targetea net10.0-windows pero compila gracias a <EnableWindowsTargeting>.
-  # Los tests de DPAPI (SecretProtectorTests) se auto-saltean en non-Windows.
   build-and-test-linux:
     runs-on: ubuntu-latest
     steps:
@@ -48,8 +47,7 @@ jobs:
           name: test-results-linux
           path: TestResults
 
-  # Job en Windows: valida que el Client se compile y empaquete sobre su target real, y corre
-  # los tests de DPAPI que en Linux se auto-saltean.
+  # Job en Windows: valida que el Client se compile y empaquete sobre su target real.
   build-and-test-windows:
     runs-on: windows-latest
     steps:
@@ -129,9 +127,6 @@ jobs:
       # docker-compose lee estos del environment del proceso (preferido sobre .env
       # porque evita escribir secrets a disco en el runner).
       CANELARY_DB_CONNECTION: ${{ secrets.CANELARY_DB_CONNECTION }}
-      CANELARY_AUTH_CLAVE_PUBLICA: ${{ secrets.CANELARY_AUTH_CLAVE_PUBLICA }}
-      CANELARY_AUTH_CLAVE_PRIVADA: ${{ secrets.CANELARY_AUTH_CLAVE_PRIVADA }}
-      CANELARY_AUTH_CLAVE_DESCARGA: ${{ secrets.CANELARY_AUTH_CLAVE_DESCARGA }}
       SERVER_HOST_PORT: "5262"
       # Host header usado para llegar a la WebApp a traves de Traefik.
       # Debe coincidir con la regla en docker-compose.yml (traefik.http.routers.canelary.rule).

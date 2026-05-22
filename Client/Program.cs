@@ -40,16 +40,6 @@ internal class Program
                     Scheme = string.IsNullOrWhiteSpace(data.Server!.Scheme) ? "http" : data.Server!.Scheme!,
                 });
             });
-            builder.Services.AddSingleton<IOptions<AuthOptions>>(sp =>
-            {
-                var data = sp.GetRequiredService<ConfigService>().Data;
-                return Options.Create(new AuthOptions
-                {
-                    ClavePublica = data.Auth!.ClavePublica,
-                    ClavePrivada = data.Auth!.ClavePrivada,
-                    ClaveDescarga = data.Auth!.ClaveDescarga,
-                });
-            });
             builder.Services.AddSingleton<IOptions<AppOptions>>(sp =>
             {
                 var data = sp.GetRequiredService<ConfigService>().Data;
@@ -63,15 +53,13 @@ internal class Program
                 });
             });
 
-            // Typed HttpClient con resilience handler y el AuthHeaderHandler delegating handler.
-            builder.Services.AddTransient<AuthHeaderHandler>();
+            // Typed HttpClient con resilience handler.
             builder.Services.AddHttpClient<ICanelaryApi, CanelaryApiClient>((sp, http) =>
             {
                 var server = sp.GetRequiredService<IOptions<ServerOptions>>().Value;
                 // Scheme (http/https) configurable; default http para mantener compat con servidores legacy.
                 http.BaseAddress = new Uri($"{server.Scheme}://{server.Ip}:{server.Port}/");
             })
-            .AddHttpMessageHandler<AuthHeaderHandler>()
             .AddStandardResilienceHandler(options =>
             {
                 options.Retry.MaxRetryAttempts = 2;

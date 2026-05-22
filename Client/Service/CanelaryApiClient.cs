@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using Client.Serialization;
 using Core;
@@ -32,14 +31,9 @@ namespace Client.Service
             return await response.Content.ReadAsStringAsync(cancellationToken);
         }
 
-        public async Task<HttpResponseMessage> DownloadInstallerAsync(string descargaKey, CancellationToken cancellationToken = default)
+        public async Task<HttpResponseMessage> DownloadInstallerAsync(CancellationToken cancellationToken = default)
         {
-            // Manda la clave en Authorization: Bearer en vez de query-string para evitar
-            // que aparezca en logs de IIS/Kestrel. El Server tambien acepta ?key= como fallback
-            // transitorio para no romper clientes ya desplegados.
-            using var request = new HttpRequestMessage(HttpMethod.Get, "/installer");
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", descargaKey);
-            return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            return await http.GetAsync("/installer", HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         }
     }
 }

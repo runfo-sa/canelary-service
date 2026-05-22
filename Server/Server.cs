@@ -1,12 +1,10 @@
 ﻿using Core;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 using Server.Logic;
 using Server.Models;
 using Server.Serialization;
 using System.Diagnostics;
-using System.Net;
 using System.Threading.RateLimiting;
 
 namespace Server
@@ -16,25 +14,6 @@ namespace Server
         private static readonly string ClientFolder = "client-repo";
         private static readonly string ClientFile = "Client.exe";
         private static readonly string InstallerFile = "installer.ps1";
-
-        /// <summary>
-        /// Resuelve la clave de descarga preferentemente desde el header <c>Authorization: Bearer ...</c>,
-        /// y como fallback transitorio desde el query string <c>?key=...</c> para no romper clientes ya
-        /// desplegados que usan el esquema anterior.
-        /// </summary>
-        private static string? ResolveDownloadKey(HttpContext context)
-        {
-            if (context.Request.Headers.TryGetValue("Authorization", out var auth))
-            {
-                string value = auth.ToString();
-                const string prefix = "Bearer ";
-                if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    return value.Substring(prefix.Length);
-                }
-            }
-            return context.Request.Query["key"];
-        }
 
         // Normaliza RemoteIpAddress al dotted IPv4. Kestrel bindeando en `http://+:8080`
         // expone un socket dual-stack en Linux, asi que conexiones IPv4 llegan como
@@ -84,14 +63,6 @@ namespace Server
                 var cs = sp.GetRequiredService<IConfiguration>().GetConnectionString("DefaultConnection");
                 options.UseSqlServer(cs);
             });
-
-            // Options pattern para la seccion Auth.
-            // El builder ya incluye AddEnvironmentVariables() por default, asi que en produccion
-            // se puede setear `Auth__ClavePublica`, `Auth__ClavePrivada`, `Auth__ClaveDescarga`
-            // como env vars y sacar el bloque de appsettings.json sin tocar codigo.
-            builder.Services.AddOptions<AuthConfig>()
-                .BindConfiguration("Auth")
-                .ValidateOnStart();
 
             // Path al share de Etiquetas. En Windows dev es la ruta UNC; en Linux/Docker
             // se override via Etiquetas__Path apuntando al bind-mount del share SMB.
@@ -156,33 +127,11 @@ namespace Server
             app.UseSwaggerUI();
             app.UseRateLimiter();
 
-            // Healthcheck endpoint exento de auth y rate-limiting; usable por load balancers / oncall.
+            // Healthcheck endpoint exento de rate-limiting; usable por load balancers / oncall.
             app.MapHealthChecks("/healthz").DisableRateLimiting();
 
-            var authConfig = app.Services.GetRequiredService<IOptions<AuthConfig>>().Value;
             var etiquetasSnapshot = app.Services.GetRequiredService<EtiquetasSnapshot>();
             var clientWatch = app.Services.GetService<WatcherClient>();
-
-            app.Use(async (context, next) =>
-            {
-                // Middleware que verifica si es una conexión valida y la termina en caso de no serlo.
-                // Solamente para estos endpoints.
-                if (context.Request.Path.StartsWithSegments("/validate-client") ||
-                    context.Request.Path.StartsWithSegments("/multiple-installations"))
-                {
-                    string? key = context.Request.Headers["request-key"];
-                    string? hash = context.Request.Headers["request-hash"];
-
-                    if (!AuthValidator.IsRequestAuthorized(key, hash, authConfig.ClavePrivada))
-                    {
-                        context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-                        await context.Response.WriteAsync("Unauthorized");
-                        return;
-                    }
-                }
-
-                await next();
-            });
 
             app.UseRouting();
 
@@ -279,12 +228,6 @@ namespace Server
 
             app.MapGet("/get-client", (HttpContext context, ILoggerFactory loggerFactory) =>
             {
-                string? key = ResolveDownloadKey(context);
-                if (!AuthValidator.IsDownloadKeyValid(key, authConfig.ClaveDescarga))
-                {
-                    return Results.Unauthorized();
-                }
-
                 var path = Path.Combine(AppContext.BaseDirectory, ClientFolder, ClientFile);
                 LogDownloadCompletion(context, loggerFactory, "get-client", path);
                 return Results.File(
@@ -296,12 +239,6 @@ namespace Server
 
             app.MapGet("/installer", (HttpContext context, ILoggerFactory loggerFactory) =>
             {
-                string? key = ResolveDownloadKey(context);
-                if (!AuthValidator.IsDownloadKeyValid(key, authConfig.ClaveDescarga))
-                {
-                    return Results.Unauthorized();
-                }
-
                 var path = Path.Combine(AppContext.BaseDirectory, ClientFolder, InstallerFile);
                 LogDownloadCompletion(context, loggerFactory, "installer", path);
                 return Results.File(

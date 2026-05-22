@@ -259,14 +259,11 @@ Si el puerto no abre, revisar firewall en el servidor SQL y reglas de la red pri
 
 En el repo, **Settings → Secrets and variables → Actions → New repository secret**, crear:
 
-| Secret                         | Valor                                                                                                                  |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `CANELARY_DB_CONNECTION`       | `Server=rafa;Database=VisualTernera;User Id=canelary_app;Password=<password>;Encrypt=True;TrustServerCertificate=True` |
-| `CANELARY_AUTH_CLAVE_PUBLICA`  | Clave publica usada por el Client para firmar requests                                                                 |
-| `CANELARY_AUTH_CLAVE_PRIVADA`  | Clave privada con la que el Server valida los requests                                                                 |
-| `CANELARY_AUTH_CLAVE_DESCARGA` | Clave que protege los endpoints `/get-client` y `/installer`                                                           |
+| Secret                   | Valor                                                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `CANELARY_DB_CONNECTION` | `Server=rafa;Database=VisualTernera;User Id=canelary_app;Password=<password>;Encrypt=True;TrustServerCertificate=True` |
 
-Los valores se pueden tomar del `appsettings.json` de produccion o del keystore que use el equipo. **No** commitear estos valores en el repo.
+**No** commitear este valor en el repo.
 
 Otros valores no-sensibles del workflow estan hardcodeados en [`ci.yml`](.github/workflows/ci.yml):
 
@@ -351,9 +348,6 @@ Si necesitas pasarle env vars manualmente (ej. el runner las setea desde secrets
 
 ```bash
 export CANELARY_DB_CONNECTION="..."
-export CANELARY_AUTH_CLAVE_PUBLICA="..."
-export CANELARY_AUTH_CLAVE_PRIVADA="..."
-export CANELARY_AUTH_CLAVE_DESCARGA="..."
 export SERVER_HOST_PORT=5262
 docker compose up -d --no-build
 ```
@@ -422,7 +416,7 @@ El `location ~` de [`WebApp/nginx.conf`](WebApp/nginx.conf) lista los endpoints 
 - [ ] SQL auth habilitado en el servidor SQL
 - [ ] Usuario `canelary_app` creado con permisos sobre `VisualTernera`
 - [ ] Conectividad VM → SQL Server validada (puerto 1433)
-- [ ] Los 4 secrets cargados en GitHub
+- [ ] El secret `CANELARY_DB_CONNECTION` cargado en GitHub
 - [ ] Puerto 5262 abierto en el firewall de la VM (Clients Windows); puerto 80 abierto si la WebApp se accede desde fuera de la VM (segun politica de red interna)
 - [ ] DNS interno: `canelary.runfosa.local` resuelve a la IP de la VM
 - [ ] Push de prueba a `main` corre exitoso de punta a punta

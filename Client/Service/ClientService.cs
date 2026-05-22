@@ -14,7 +14,6 @@ namespace Client.Service
     public sealed class ClientService(
         ICanelaryApi api,
         ConfigService config,
-        IOptions<AuthOptions> authOptions,
         ILogger<ClientService> logger)
     {
         // Lazy para que un fallo de red al determinar la IP no rompa la construccion del singleton
@@ -29,7 +28,6 @@ namespace Client.Service
             }
         });
         private string _ip => _ipLazy.Value;
-        private readonly AuthOptions _auth = authOptions.Value;
         private string[] _foundInstallations = [];
 
         public async Task EnsurePiPathAsync(CancellationToken cancellationToken = default)
@@ -128,7 +126,7 @@ namespace Client.Service
                     return;
                 }
 
-                using HttpResponseMessage response = await api.DownloadInstallerAsync(_auth.ClaveDescarga, cancellationToken);
+                using HttpResponseMessage response = await api.DownloadInstallerAsync(cancellationToken);
                 response.EnsureSuccessStatusCode();
 
                 string filename = response.Content.Headers.ContentDisposition!.FileName!;

@@ -214,6 +214,9 @@ csx/
 ecf/
 rcf/
 
+# Claude
+.claude/
+
 # Windows Store app package directories and files
 AppPackages/
 BundleArtifacts/

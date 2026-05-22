@@ -9,6 +9,6 @@ namespace Client.Service
         Task ReportMultipleInstallationsAsync(Core.Request request, CancellationToken cancellationToken = default);
         Task ReportNotInstalledAsync(Core.Request request, CancellationToken cancellationToken = default);
         Task<string> GetClientVersionAsync(CancellationToken cancellationToken = default);
-        Task<HttpResponseMessage> DownloadInstallerAsync(string descargaKey, CancellationToken cancellationToken = default);
+        Task<HttpResponseMessage> DownloadInstallerAsync(CancellationToken cancellationToken = default);
     }
 }

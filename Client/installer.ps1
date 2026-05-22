@@ -5,7 +5,7 @@ $ServiceName = "VSTC"
 $DisplayName = "Canelary - Controlador de Etiquetas"
 $FolderPath = "C:\soft\Canelary\Service\"
 $FilePath = "C:\soft\Canelary\Service\Client.exe"
-$Uri = "http://localhost:5262/get-client?key={0}" -f $env:Auth__ClaveDescarga
+$Uri = "http://localhost:5262/get-client"
 
 New-Item -ItemType Directory -Force -Path $FolderPath
 Invoke-WebRequest -Uri $Uri -OutFile $FilePath

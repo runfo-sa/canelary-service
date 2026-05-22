@@ -21,9 +21,6 @@ services:
       TZ: America/Argentina/Buenos_Aires
       CANELARY_SERVER_LOG_BASE: /var/log/canelary-server
       ConnectionStrings__DefaultConnection: ${CANELARY_DB_CONNECTION}
-      Auth__ClavePublica: ${CANELARY_AUTH_CLAVE_PUBLICA}
-      Auth__ClavePrivada: ${CANELARY_AUTH_CLAVE_PRIVADA}
-      Auth__ClaveDescarga: ${CANELARY_AUTH_CLAVE_DESCARGA}
       # El share SMB \\twinssrv\Twins\PiQuatro\Etiquetas se monta en el host via /etc/fstab
       # y se bind-montea al contenedor (ver DEPLOY.md). UNC paths no son validos en Linux.
       Etiquetas__Path: /mnt/etiquetas

@@ -2,10 +2,12 @@ import { useState } from "react"
 import { ClientCard } from "@/components/ClientCard"
 import { RefreshControl } from "@/components/RefreshControl"
 import { usePollingClients, type PollingInterval } from "@/hooks/usePollingClients"
+import { useNow } from "@/hooks/useNow"
 
 function App() {
   const [interval, setInterval] = useState<PollingInterval>(60)
   const { data, loading, error, lastFetch, refresh } = usePollingClients(interval)
+  const now = useNow()
 
   return (
     <div className="min-h-screen px-4 py-6 sm:px-6 lg:px-8">
@@ -42,7 +44,7 @@ function App() {
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {data.map((client) => (
-            <ClientCard key={client.id} client={client} />
+            <ClientCard key={client.id} client={client} now={now} />
           ))}
         </div>
       </main>

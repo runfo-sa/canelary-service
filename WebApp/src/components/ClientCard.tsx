@@ -1,9 +1,9 @@
 import { useState } from "react"
-import { ChevronDown } from "lucide-react"
+import { AlertTriangle, ChevronDown } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { statusColors } from "@/lib/statusColors"
 import { StatusLabel, TipoDiff, type ClientStatus, type EtiquetaCliente } from "@/types"
-import { cn } from "@/lib/utils"
+import { cn, formatRelativeEs, isStale } from "@/lib/utils"
 
 const dateFmt = new Intl.DateTimeFormat("es-AR", {
   dateStyle: "short",
@@ -12,11 +12,15 @@ const dateFmt = new Intl.DateTimeFormat("es-AR", {
 
 interface Props {
   client: ClientStatus
+  now: Date
 }
 
-export function ClientCard({ client }: Props) {
+export function ClientCard({ client, now }: Props) {
   const style = statusColors[client.estado]
-  const fecha = dateFmt.format(new Date(client.ultimaConexion))
+  const last = new Date(client.ultimaConexion)
+  const fecha = dateFmt.format(last)
+  const relativo = formatRelativeEs(last, now)
+  const stale = isStale(last, now)
   const etiquetas = client.etiquetas ?? []
   const desactualizadas = etiquetas.filter((e) => e.tipo === TipoDiff.Desactualizada)
   const sobrantes = etiquetas.filter((e) => e.tipo === TipoDiff.Sobrante)
@@ -34,8 +38,20 @@ export function ClientCard({ client }: Props) {
           {StatusLabel[client.estado]}
         </div>
 
-        <div className="text-xs opacity-80 mt-auto pt-2 border-t border-white/20">
-          Última conexión: {fecha}
+        <div
+          className={cn(
+            "text-xs mt-auto pt-2 border-t border-white/20 flex flex-wrap items-center gap-2",
+            stale ? "opacity-95" : "opacity-80",
+          )}
+          title={fecha}
+        >
+          <span>Última conexión: {relativo}</span>
+          {stale && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/90 text-amber-950 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide">
+              <AlertTriangle className="h-3 w-3" />
+              Sin responder
+            </span>
+          )}
         </div>
       </CardContent>
 

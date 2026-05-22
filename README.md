@@ -6,10 +6,10 @@ Este proyecto está dividido en tres proyectos de .NET 10:
 
 - **Client** — Windows Service (`Microsoft.NET.Sdk.Worker`) que corre en las máquinas de producción.
 - **Server** — Web API (`Microsoft.NET.Sdk.Web`, Minimal API) que recibe los reportes de los clientes y los persiste en SQL Server.
-- **Core** — Biblioteca compartida con los DTOs y helpers comunes (HMAC, escaner de etiquetas, IP).
+- **Core** — Biblioteca compartida con los DTOs y helpers comunes (escaner de etiquetas, IP).
 - **Tests/Canelary.Tests** — Tests unitarios (xUnit) que cubren los componentes críticos.
 
-Para detalles internos del codigo (DI, options pattern, typed HTTP client, source-gen JSON, file logger, semaforos, DPAPI, etc.) ver [ARCHITECTURE.md](ARCHITECTURE.md).
+Para detalles internos del codigo (DI, options pattern, typed HTTP client, source-gen JSON, file logger, semaforos, etc.) ver [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Ejemplo:
 
@@ -40,10 +40,6 @@ Para que el servidor pueda comunicarse con la base de datos:
 2. Modificar la cadena de conexión **DefaultConnection** dentro de [Server/appsettings.json](Server/appsettings.json) para que apunte a la base.
 3. Asignar el rol **vst_server** al usuario correspondiente.
 
-#### Configurar secretos sin tocar appsettings.json
-
-`Auth__ClavePublica`, `Auth__ClavePrivada` y `Auth__ClaveDescarga` pueden setearse como variables de entorno y sobreescriben los valores del `appsettings.json` (el host de ASP.NET aplica esa precedencia por defecto). En entornos productivos se recomienda dejar el bloque `"Auth"` vacio en el JSON y proveerlo via env vars.
-
 #### Healthcheck
 
 El servidor expone `GET /healthz` para monitoreo (no requiere auth, no cuenta para el rate limiter). Devuelve 200 si la conexion a la base de datos esta viva, 503 si no.
@@ -57,14 +53,6 @@ Para poder instalar el cliente es necesario contar con:
 - Una versión de Windows 10 1607+ o Windows 11 22000+, 64 bits.
 
 Para instalar, ejecutar el script **[Client/installer.ps1](Client/installer.ps1)** como administrador.
-
-#### Encriptado de secretos en reposo
-
-A partir de la primera ejecucion el archivo `C:\ProgramData\Canelary Service\appsettings.json` se reescribe con la seccion `Auth` cifrada via Windows DPAPI (`DataProtectionScope.LocalMachine`). Los tres campos quedan como base64 ciphertext y el flag `"Encrypted": true` marca el estado.
-
-Si se edita el archivo manualmente y se ponen las claves en plaintext (con `"Encrypted": false`), el servicio las leera y las migrara automaticamente al siguiente `Save()`.
-
-> :warning: Si se reinstala Windows o se cambia la maquina, las claves cifradas no se podran leer y hay que regenerar el `appsettings.json` (borrarlo y dejar que el servicio escriba el default plaintext, o restaurar desde un backup que estuviera en plaintext).
 
 ---
 
@@ -98,25 +86,9 @@ El servidor escucha y responde a las peticiones de los clientes via _API REST_ (
 
 Esta limitado a **100 peticiones cada 10 minutos** por la fixed-window rate limiter. El endpoint `/healthz` esta exento.
 
+> :information_source: La API no aplica autenticacion a nivel aplicacion. Se asume despliegue en red privada (LAN interna) con el puerto 5262 restringido por firewall a los clientes autorizados.
+
 ---
-
-### • Autenticación
-
-**Reportes (POST `/validate-client`, `/multiple-installations`)**: el cliente firma cada request con HMAC-SHA256 usando `ClavePublica` como mensaje y `ClavePrivada` como clave, y envia los headers:
-
-```
-request-key:  <ClavePublica>
-request-hash: <base64(HMAC-SHA256(ClavePrivada, ClavePublica))>
-```
-
-El servidor recomputa el hash y lo compara en **tiempo constante** (`CryptographicOperations.FixedTimeEquals`). El POST `/not-installed` no requiere auth (es solo telemetria).
-
-**Descargas (GET `/get-client`, `/installer`)**: la clave de descarga se manda en `Authorization: Bearer <ClaveDescarga>`. El servidor sigue aceptando `?key=<ClaveDescarga>` como fallback transitorio para no romper clientes ya desplegados (el `installer.ps1` actual todavia usa ese esquema).
-
-Las tres claves se configuran en:
-
-- Server: `appsettings.json` seccion `"Auth"` o env vars `Auth__ClavePublica` etc.
-- Client: `C:\ProgramData\Canelary Service\appsettings.json` seccion `"Auth"` (cifrada via DPAPI a partir del primer arranque).
 
 #### HTTPS
 
@@ -144,7 +116,7 @@ dotnet build Service.sln -c Release
 # Compilar tratando warnings de async como errores (igual que CI)
 dotnet build Service.sln -c Release /warnaserror:CS4014,CS8618,CS1998
 
-# Correr la suite de tests (36 tests, ~100ms)
+# Correr la suite de tests
 dotnet test Service.sln -c Release
 ```
 
@@ -152,8 +124,8 @@ dotnet test Service.sln -c Release
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) corre dos jobs en paralelo:
 
-- **build-and-test-linux** (`ubuntu-latest`) — job primario, porque el Server productivo corre en Linux. El Client targetea `net10.0-windows` pero compila gracias a `<EnableWindowsTargeting>true</EnableWindowsTargeting>` en su csproj. Los tests de DPAPI (`SecretProtectorTests`) se auto-saltean en non-Windows.
-- **build-and-test-windows** (`windows-latest`) — valida que el Client y los tests DPAPI corran sobre su target real.
+- **build-and-test-linux** (`ubuntu-latest`) — job primario, porque el Server productivo corre en Linux. El Client targetea `net10.0-windows` pero compila gracias a `<EnableWindowsTargeting>true</EnableWindowsTargeting>` en su csproj.
+- **build-and-test-windows** (`windows-latest`) — valida que el Client compile sobre su target real.
 
 Ambos jobs hacen: `dotnet restore` → `dotnet build -c Release /warnaserror:CS4014,CS8618,CS1998` → `dotnet test` con `XPlat Code Coverage` → upload de `TestResults/` como artifact. Ambos deben pasar para que un PR sea mergeable.
 
